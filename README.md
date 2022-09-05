@@ -72,6 +72,14 @@ python3 -m build
 python3 -m twine upload dist/*
 ```
 
+Test the package:
+```
+conda env remove -n picklescan-test
+conda env create -f conda.test.yaml
+conda activate picklescan-test
+picklescan --huggingface ykilcher/totally-harmless-model
+```
+
 Tested on `Linux 5.10.102.1-microsoft-standard-WSL2 x86_64` (WSL2).
 
 ## References
