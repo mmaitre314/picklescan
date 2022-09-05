@@ -4,7 +4,7 @@ Security scanner detecting Python Pickle files performing suspicious actions.
 
 ## Getting started
 
-Scan a malicious model on Hugging Face:
+Scan a malicious model on [Hugging Face](https://huggingface.co/):
 ```bash
 pip install picklescan
 picklescan --huggingface ykilcher/totally-harmless-model
@@ -17,14 +17,14 @@ Scanned files: 1
 Infected files: 1
 ```
 
-The scanner can also load Pickles from local files, directories, URLs, and zip archives (a-la PyTorch):
+The scanner can also load Pickles from local files, directories, URLs, and zip archives (a-la [PyTorch](https://pytorch.org/)):
 ```bash
 picklescan --path downloads/pytorch_model.bin
 picklescan --path downloads
 picklescan --url https://huggingface.co/sshleifer/tiny-distilbert-base-cased-distilled-squad/resolve/main/pytorch_model.bin
 ```
 
-The scanner exit status codes are:
+The scanner exit status codes are (a-la [ClamAV](https://www.clamav.net/)):
 - `0`: scan did not find malware
 - `1`: scan found malware
 - `2`: scan failed
