@@ -64,6 +64,14 @@ picklescan -l DEBUG -p downloads/pytorch_model.bin
 picklescan -l DEBUG -u https://huggingface.co/prajjwal1/bert-tiny/resolve/main/pytorch_model.bin
 ```
 
+Publish the package to [PyPI](https://pypi.org/project/picklescan/):
+```
+python3 -m pip install --upgrade pip
+python3 -m pip install --upgrade build
+python3 -m build
+python3 -m twine upload dist/*
+```
+
 Tested on `Linux 5.10.102.1-microsoft-standard-WSL2 x86_64` (WSL2).
 
 ## References
