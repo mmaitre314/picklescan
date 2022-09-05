@@ -1,0 +1,8 @@
+(lp0
+Va
+p1
+aVb
+p2
+aVc
+p3
+a.
