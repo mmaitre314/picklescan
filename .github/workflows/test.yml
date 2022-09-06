@@ -19,16 +19,17 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: "3.7"
-      - name: Install dependencies
+      - name: Install packages
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+          python -m pip install -e .
       - name: Lint with flake8
         run: |
           # Fail the build if there are Python syntax errors or undefined names
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          python -m flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
           # Treat other issues as warnings
-          flake8 . --count --exit-zero --max-complexity=10 --statistics
+          python -m flake8 . --count --exit-zero --max-complexity=10 --statistics
       - name: Test with pytest
         run: |
-          pytest tests --doctest-modules --junitxml=junit/test-results.xml --cov=com --cov-report=xml --cov-report=html
+          python -m pytest tests --cov=picklescan --doctest-modules --junitxml=junit/test-results.xml --cov-report=xml --cov-report=html
