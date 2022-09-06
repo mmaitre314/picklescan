@@ -12,18 +12,18 @@ import zipfile
 _log = logging.getLogger("picklescan")
 
 _suspicious_globals = {
-    "__builtin__": {"eval", "compile", "getattr", "apply"}, # Pickle versions 0, 1, 2 have those function under '__builtin__'
-    "builtins": {"eval", "compile", "getattr", "apply"}, # Pickle versions 3, 4 have those function under 'builtins'
-    "webbrowser": "*", # Includes webbrowser.open()
-    "httplib": "*", # Includes http.client.HTTPSConnection()
+    "__builtin__": {"eval", "compile", "getattr", "apply"},  # Pickle versions 0, 1, 2 have those function under '__builtin__'
+    "builtins": {"eval", "compile", "getattr", "apply"},  # Pickle versions 3, 4 have those function under 'builtins'
+    "webbrowser": "*",  # Includes webbrowser.open()
+    "httplib": "*",  # Includes http.client.HTTPSConnection()
     "requests.api": "*",
     "aiohttp.client": "*",
-    "nt": "*", # Alias for 'os' on Windows. Includes os.system()
-    "posix": "*", # Alias for 'os' on Linux. Includes os.system()
+    "nt": "*",  # Alias for 'os' on Windows. Includes os.system()
+    "posix": "*",  # Alias for 'os' on Linux. Includes os.system()
 }
 
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib"}
-_zip_file_extensions = {".zip", ".bin"} # PyTorch's pytorch_model.bin are zip archives
+_zip_file_extensions = {".zip", ".bin"}  # PyTorch's pytorch_model.bin are zip archives
 
 
 def _http_get(url):
@@ -37,7 +37,7 @@ def _http_get(url):
         conn.request("GET", path_and_query)
         response = conn.getresponse()
         _log.debug(f"Response: status code {response.status} reason {response.reason}")
-        if response.status == 302: # Follow redirections
+        if response.status == 302:  # Follow redirections
             return _http_get(response.headers["Location"])
         elif response.status >= 400:
             raise RuntimeError(f"HTTP {response.status} ({response.reason}) calling GET {parsed_url.scheme}://{parsed_url.netloc}{path_and_query}")
@@ -47,14 +47,14 @@ def _http_get(url):
 
 
 def _list_globals(data):
-    
+
     # Remove unused opcodes (makes it easier to analyze)
     data = pickletools.optimize(data)
 
     # List opcodes
     # TODO: handle pickles with multiple objects in them
     ops = list(pickletools.genops(data))
-    
+
     # Extract global imports
     globals = set()
     for n in range(len(ops)):
@@ -95,7 +95,7 @@ def scan_zip_bytes(data, file_id):
 
     with zipfile.ZipFile(io.BytesIO(data), "r") as zip:
         file_names = zip.namelist()
-        _log.debug(f"Files in archive %s: %s", file_id, file_names)
+        _log.debug("Files in archive %s: %s", file_id, file_names)
         for file_name in file_names:
             if os.path.splitext(file_name)[1] in _pickle_file_extensions:
                 _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
@@ -196,15 +196,15 @@ def main():
         else:
             raise ValueError("Command line must include either a path, a URL, or a Hugging Face model")
 
-        _log.info(
-f"""----------- SCAN SUMMARY -----------
+        _log.info(f"""----------- SCAN SUMMARY -----------
 Scanned files: {files_scanned_count}
 Infected files: {files_suspicious_count}""")
 
         return 0 if files_suspicious_count == 0 else 1
-    except Exception as e:
+    except Exception:
         _log.exception("Unhandled exception")
         return 2
+
 
 if __name__ == '__main__':
     sys.exit(main())

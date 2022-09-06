@@ -45,7 +45,7 @@ Install the package in editable mode to develop and test:
 python3 -m pip install -e .
 ```
 
-Edit with VS Code:
+Edit with [VS Code](https://code.visualstudio.com/):
 ```
 code .
 ```
@@ -89,6 +89,7 @@ Tested on `Linux 5.10.102.1-microsoft-standard-WSL2 x86_64` (WSL2).
 
 ## References
 
+- [Hugging Face Pickle Scanning](https://huggingface.co/docs/hub/security-pickle), Luc Georges, 2022
 - [The hidden dangers of loading open-source AI models (ARBITRARY CODE EXPLOIT!](https://www.youtube.com/watch?v=2ethDz9KnLk), Yannic Kilcher, 2022
 - [Secure Machine Learning at Scale with MLSecOps](https://github.com/EthicalML/fml-security#2---load-pickle-and-inject-malicious-code), Alejandro Saucedo, 2022
 - [Never a dill moment: Exploiting machine learning pickle files](https://blog.trailofbits.com/2021/03/15/never-a-dill-moment-exploiting-machine-learning-pickle-files/), Evan Sultanik, 2021 (tool: [Fickling](https://github.com/trailofbits/fickling))

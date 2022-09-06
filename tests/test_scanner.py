@@ -6,31 +6,39 @@ import pytest
 import zipfile
 import requests
 import aiohttp
-from picklescan.scanner import _http_get, _list_globals, scan_pickle_bytes, scan_zip_bytes, scan_directory_path, scan_file_path, scan_url, scan_huggingface_model
+from picklescan.scanner import _http_get, _list_globals, scan_pickle_bytes, scan_zip_bytes,\
+    scan_directory_path, scan_file_path, scan_url, scan_huggingface_model
 
 _root_path = os.path.dirname(__file__)
+
 
 class Malicious1:
     def __reduce__(self):
         return eval, ("print('456')",)
 
+
 class Malicious2:
     def __reduce__(self):
         return os.system, ("ls -la",)
+
 
 class Malicious3:
     def __reduce__(self):
         return http.client.HTTPSConnection, ("github.com",)
 
-malicious3_pickle_bytes = pickle.dumps(Malicious3(), protocol=0) # Malicious3 needs to be pickled before HTTPSConnection is mocked below
+
+malicious3_pickle_bytes = pickle.dumps(Malicious3(), protocol=0)  # Malicious3 needs to be pickled before HTTPSConnection is mocked below
+
 
 class Malicious4:
     def __reduce__(self):
         return requests.get, ("https://github.com",)
 
+
 class Malicious5:
     def __reduce__(self):
         return aiohttp.ClientSession, tuple()
+
 
 class HTTPResponse:
     def __init__(self, status, data=None):
@@ -40,6 +48,7 @@ class HTTPResponse:
 
     def read(self):
         return self.data
+
 
 class MockHTTPSConnection:
     def __init__(self, host):
@@ -85,6 +94,7 @@ class MockHTTPSConnection:
     def close(self):
         pass
 
+
 http.client.HTTPSConnection = MockHTTPSConnection
 
 
@@ -120,13 +130,16 @@ def initialize_pickle_files():
     # Malicious Pickle from https://sensepost.com/cms/resources/conferences/2011/sour_pickles/BH_US_11_Slaviero_Sour_Pickles.pdf
     initialize_data_file(
         f"{_root_path}/data/malicious0.pkl",
-        b"c__builtin__\nglobals\n(tRp100\n0c__builtin__\ncompile\n(S\'fl=open(\"/etc/passwd\");picklesmashed=fl.read();\'\nS\'\'\nS\'exec\'\ntRp101\n0c__builtin__\neval\n(g101\ng100\ntRp102\n0c__builtin__\ngetattr\n(c__builtin__\ndict\nS\'get\'\ntRp103\n0c__builtin__\napply\n(g103\n(g100\nS\'picklesmashed\'\nltRp104\n0g104\n.")
+        b"c__builtin__\nglobals\n(tRp100\n0c__builtin__\ncompile\n(S\'fl=open(\"/etc/passwd\");picklesmashed=fl.read();" +
+        b"\'\nS\'\'\nS\'exec\'\ntRp101\n0c__builtin__\neval\n(g101\ng100\ntRp102\n0c__builtin__\ngetattr\n(c__builtin__\n" +
+        b"dict\nS\'get\'\ntRp103\n0c__builtin__\napply\n(g103\n(g100\nS\'picklesmashed\'\nltRp104\n0g104\n.")
 
     initialize_data_file(f"{_root_path}/data/malicious3.pkl", malicious3_pickle_bytes)
     initialize_pickle_file(f"{_root_path}/data/malicious4.pickle", Malicious4(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious5.pickle", Malicious5(), 4)
 
     initialize_zip_file(f"{_root_path}/data/malicious1.zip", "data.pkl", pickle.dumps(Malicious1(), protocol=4))
+
 
 initialize_pickle_files()
 
@@ -136,8 +149,8 @@ def test_http_get():
 
     with pytest.raises(RuntimeError):
         _http_get("https://localhost/mock/400")
-    
-    
+
+
 def test_list_globals():
     assert _list_globals(pickle.dumps(Malicious1())) == {('builtins', 'eval')}
 
