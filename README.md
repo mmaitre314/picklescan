@@ -89,9 +89,11 @@ Tested on `Linux 5.10.102.1-microsoft-standard-WSL2 x86_64` (WSL2).
 
 ## References
 
+- [Machine Learning Attack Series: Backdooring Pickle Files](https://embracethered.com/blog/posts/2022/machine-learning-attack-series-injecting-code-pickle-files/), Johann Rehberger, 2022
 - [Hugging Face Pickle Scanning](https://huggingface.co/docs/hub/security-pickle), Luc Georges, 2022
 - [The hidden dangers of loading open-source AI models (ARBITRARY CODE EXPLOIT!](https://www.youtube.com/watch?v=2ethDz9KnLk), Yannic Kilcher, 2022
 - [Secure Machine Learning at Scale with MLSecOps](https://github.com/EthicalML/fml-security#2---load-pickle-and-inject-malicious-code), Alejandro Saucedo, 2022
+- [Backdooring Pickles: A decade only made things worse](https://coldwaterq.com/presentations/ColdwaterQ%20-%20BACKDOORING%20Pickles%20A%20decade%20only%20made%20things%20worse%20-%20v1.pdf), ColdwaterQ, DEFCON 2022
 - [Never a dill moment: Exploiting machine learning pickle files](https://blog.trailofbits.com/2021/03/15/never-a-dill-moment-exploiting-machine-learning-pickle-files/), Evan Sultanik, 2021 (tool: [Fickling](https://github.com/trailofbits/fickling))
 - [Exploiting Python pickles](https://davidhamann.de/2020/04/05/exploiting-python-pickle/), David Hamann, 2020
 - [Dangerous Pickles - malicious python serialization](https://intoli.com/blog/dangerous-pickles/), Evan Sangaline, 2017
