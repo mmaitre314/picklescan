@@ -5,4 +5,4 @@ dependencies:
 - python=3.7
 - pip
 - pip:
-  - picklescan==0.0.1
+  - picklescan==0.0.2

@@ -77,7 +77,7 @@ python3 -m build
 python3 -m twine upload dist/*
 ```
 
-Test the package:
+Test the package: bump the version of `picklescan` in `conda.test.yaml` and run
 ```
 conda env remove -n picklescan-test
 conda env create -f conda.test.yaml
