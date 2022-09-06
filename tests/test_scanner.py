@@ -137,6 +137,7 @@ def initialize_pickle_files():
     initialize_data_file(f"{_root_path}/data/malicious3.pkl", malicious3_pickle_bytes)
     initialize_pickle_file(f"{_root_path}/data/malicious4.pickle", Malicious4(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious5.pickle", Malicious5(), 4)
+    initialize_data_file(f"{_root_path}/data/malicious6.pkl", pickle.dumps(["a", "b", "c"]) + pickle.dumps(Malicious4()))
 
     initialize_zip_file(f"{_root_path}/data/malicious1.zip", "data.pkl", pickle.dumps(Malicious1(), protocol=4))
 
@@ -170,6 +171,7 @@ def test_scan_zip_bytes():
 
 def test_scan_file_path():
     assert scan_file_path(f"{_root_path}/data/benign0_v3.pkl") == (1, 0)
+    assert scan_file_path(f"{_root_path}/data/pytorch_model.bin") == (1, 0)
     assert scan_file_path(f"{_root_path}/data/malicious0.pkl") == (1, 1)
     assert scan_file_path(f"{_root_path}/data/malicious1_v0.pkl") == (1, 1)
     assert scan_file_path(f"{_root_path}/data/malicious1_v3.pkl") == (1, 1)
@@ -181,10 +183,11 @@ def test_scan_file_path():
     assert scan_file_path(f"{_root_path}/data/malicious3.pkl") == (1, 1)
     assert scan_file_path(f"{_root_path}/data/malicious4.pickle") == (1, 1)
     assert scan_file_path(f"{_root_path}/data/malicious5.pickle") == (1, 1)
+    assert scan_file_path(f"{_root_path}/data/malicious6.pkl") == (1, 1)
 
 
 def test_scan_directory_path():
-    assert scan_directory_path(f"{_root_path}/data/") == (14, 11)
+    assert scan_directory_path(f"{_root_path}/data/") == (16, 12)
 
 
 def test_scan_url():

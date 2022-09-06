@@ -48,28 +48,41 @@ def _http_get(url):
 
 def _list_globals(data):
 
-    # Remove unused opcodes (makes it easier to analyze)
-    data = pickletools.optimize(data)
-
-    # List opcodes
-    # TODO: handle pickles with multiple objects in them
-    ops = list(pickletools.genops(data))
-
-    # Extract global imports
     globals = set()
-    for n in range(len(ops)):
-        op = ops[n]
-        op_name = op[0].name
-        op_value = op[1]
 
-        if op_name == "GLOBAL":
-            globals.add(tuple(op_value.split(" ", 1)))
-        elif op_name == "STACK_GLOBAL":
-            if ops[n-2][0].name != "SHORT_BINUNICODE":
-                raise TypeError(f"Unhandled op-code type {ops[n-2][0].name} at position {n-2}")
-            if ops[n-1][0].name != "SHORT_BINUNICODE":
-                raise TypeError(f"Unhandled op-code type {ops[n-1][0].name} at position {n-1}")
-            globals.add((ops[n-2][1], ops[n-1][1]))
+    # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
+    pos = -1
+    data = io.BytesIO(data)
+    while pos < data.tell():
+        pos = data.tell()
+
+        # List opcodes
+        try:
+            ops = list(pickletools.genops(data))
+        except Exception:
+            break
+
+        # Extract global imports
+        for n in range(len(ops)):
+            op = ops[n]
+            op_name = op[0].name
+            op_value = op[1]
+
+            if op_name == "GLOBAL":
+                globals.add(tuple(op_value.split(" ", 1)))
+            elif op_name == "STACK_GLOBAL":
+                values = []
+                for offset in range(1, n):
+                    if ops[n-offset][0].name == "MEMOIZE":
+                        continue
+                    if ops[n-offset][0].name != "SHORT_BINUNICODE":
+                        raise TypeError(f"Unhandled op-code type {ops[n-offset][0].name} at position {n-offset}")
+                    values.append(ops[n-offset][1])
+                    if len(values) == 2:
+                        break
+                if len(values) != 2:
+                    raise ValueError(f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2.")
+                globals.add((values[1], values[0]))
 
     return globals
 
