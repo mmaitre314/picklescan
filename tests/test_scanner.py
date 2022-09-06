@@ -1,9 +1,12 @@
+import http.client
 import io
 import os
 import pickle
-import http.client
-import pytest
+import socket
+import subprocess
+import sys
 import zipfile
+import pytest
 import requests
 import aiohttp
 from picklescan.scanner import _http_get, _list_globals, scan_pickle_bytes, scan_zip_bytes,\
@@ -38,6 +41,21 @@ class Malicious4:
 class Malicious5:
     def __reduce__(self):
         return aiohttp.ClientSession, tuple()
+
+
+class Malicious6:
+    def __reduce__(self):
+        return socket.create_connection, (("github.com", 80),)
+
+
+class Malicious7:
+    def __reduce__(self):
+        return subprocess.run, (["ls", "-l"],)
+
+
+class Malicious8:
+    def __reduce__(self):
+        return sys.exit, (0,)
 
 
 class HTTPResponse:
@@ -138,6 +156,9 @@ def initialize_pickle_files():
     initialize_pickle_file(f"{_root_path}/data/malicious4.pickle", Malicious4(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious5.pickle", Malicious5(), 4)
     initialize_data_file(f"{_root_path}/data/malicious6.pkl", pickle.dumps(["a", "b", "c"]) + pickle.dumps(Malicious4()))
+    initialize_pickle_file(f"{_root_path}/data/malicious7.pkl", Malicious6(), 4)
+    initialize_pickle_file(f"{_root_path}/data/malicious8.pkl", Malicious7(), 4)
+    initialize_pickle_file(f"{_root_path}/data/malicious9.pkl", Malicious8(), 4)
 
     initialize_zip_file(f"{_root_path}/data/malicious1.zip", "data.pkl", pickle.dumps(Malicious1(), protocol=4))
 
@@ -184,10 +205,13 @@ def test_scan_file_path():
     assert scan_file_path(f"{_root_path}/data/malicious4.pickle") == (1, 1)
     assert scan_file_path(f"{_root_path}/data/malicious5.pickle") == (1, 1)
     assert scan_file_path(f"{_root_path}/data/malicious6.pkl") == (1, 1)
+    assert scan_file_path(f"{_root_path}/data/malicious7.pkl") == (1, 1)
+    assert scan_file_path(f"{_root_path}/data/malicious8.pkl") == (1, 1)
+    assert scan_file_path(f"{_root_path}/data/malicious9.pkl") == (1, 1)
 
 
 def test_scan_directory_path():
-    assert scan_directory_path(f"{_root_path}/data/") == (16, 12)
+    assert scan_directory_path(f"{_root_path}/data/") == (19, 15)
 
 
 def test_scan_url():

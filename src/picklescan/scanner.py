@@ -12,14 +12,17 @@ import zipfile
 _log = logging.getLogger("picklescan")
 
 _suspicious_globals = {
-    "__builtin__": {"eval", "compile", "getattr", "apply"},  # Pickle versions 0, 1, 2 have those function under '__builtin__'
-    "builtins": {"eval", "compile", "getattr", "apply"},  # Pickle versions 3, 4 have those function under 'builtins'
+    "__builtin__": {"eval", "compile", "getattr", "apply", "exec", "open", "breakpoint"},  # Pickle versions 0, 1, 2 have those function under '__builtin__'
+    "builtins": {"eval", "compile", "getattr", "apply", "exec", "open", "breakpoint"},  # Pickle versions 3, 4 have those function under 'builtins'
     "webbrowser": "*",  # Includes webbrowser.open()
     "httplib": "*",  # Includes http.client.HTTPSConnection()
     "requests.api": "*",
     "aiohttp.client": "*",
     "nt": "*",  # Alias for 'os' on Windows. Includes os.system()
     "posix": "*",  # Alias for 'os' on Linux. Includes os.system()
+    "socket": "*",
+    "subprocess": "*",
+    "sys": "*",
 }
 
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib"}
