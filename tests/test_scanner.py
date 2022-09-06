@@ -1,4 +1,5 @@
 import http.client
+import importlib
 import io
 import os
 import pickle
@@ -10,7 +11,7 @@ import pytest
 import requests
 import aiohttp
 from picklescan.scanner import _http_get, _list_globals, scan_pickle_bytes, scan_zip_bytes,\
-    scan_directory_path, scan_file_path, scan_url, scan_huggingface_model
+    scan_directory_path, scan_file_path, scan_url, scan_huggingface_model, main
 
 _root_path = os.path.dirname(__file__)
 
@@ -223,3 +224,13 @@ def test_scan_url():
 
 def test_scan_huggingface_model():
     assert scan_huggingface_model("ykilcher/totally-harmless-model") == (1, 1)
+
+
+def test_main():
+    argv = sys.argv
+    try:
+        sys.argv = ["picklescan", "-u", "https://localhost/mock/pickle/benign"]
+        assert main() == 0
+        importlib.import_module("picklescan.__main__")
+    finally:
+        sys.argv = argv
