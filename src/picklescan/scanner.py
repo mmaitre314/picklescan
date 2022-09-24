@@ -34,9 +34,9 @@ _suspicious_globals = {
 # pickle.load()
 # https://docs.python.org/3/library/pickle.html#pickle.load
 # numpy.load()
-# https://numpy.org/doc/stable/reference/generated/numpy.load.html#numpy.load   
+# https://numpy.org/doc/stable/reference/generated/numpy.load.html#numpy.load
 # numpy.ctypeslib.load_library()
-# https://numpy.org/doc/stable/reference/routines.ctypeslib.html#numpy.ctypeslib.load_library    
+# https://numpy.org/doc/stable/reference/routines.ctypeslib.html#numpy.ctypeslib.load_library
 # pandas.read_pickle()
 # https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.read_pickle.html
 # joblib.load()
