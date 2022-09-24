@@ -18,12 +18,34 @@ _suspicious_globals = {
     "httplib": "*",  # Includes http.client.HTTPSConnection()
     "requests.api": "*",
     "aiohttp.client": "*",
+    "os": "*",
     "nt": "*",  # Alias for 'os' on Windows. Includes os.system()
     "posix": "*",  # Alias for 'os' on Linux. Includes os.system()
     "socket": "*",
     "subprocess": "*",
     "sys": "*",
 }
+
+#
+# TODO: handle methods loading other Pickle files (either mark as suspicious, or follow calls to scan other files [preventing infinite loops])
+#
+# pickle.loads()
+# https://docs.python.org/3/library/pickle.html#pickle.loads
+# pickle.load()
+# https://docs.python.org/3/library/pickle.html#pickle.load
+# numpy.load()
+# https://numpy.org/doc/stable/reference/generated/numpy.load.html#numpy.load   
+# numpy.ctypeslib.load_library()
+# https://numpy.org/doc/stable/reference/routines.ctypeslib.html#numpy.ctypeslib.load_library    
+# pandas.read_pickle()
+# https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.read_pickle.html
+# joblib.load()
+# https://joblib.readthedocs.io/en/latest/generated/joblib.load.html
+# torch.load()
+# https://pytorch.org/docs/stable/generated/torch.load.html
+# tf.keras.models.load_model()
+# https://www.tensorflow.org/api_docs/python/tf/keras/models/load_model
+#
 
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib"}
 _zip_file_extensions = {".zip", ".bin"}  # PyTorch's pytorch_model.bin are zip archives
