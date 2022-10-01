@@ -8,7 +8,7 @@ from .scanner import scan_file_path
 from .scanner import scan_url
 from .scanner import scan_huggingface_model
 
-_log = logging.getLogger(__name__)
+_log = logging.getLogger("picklescan")
 
 def main():
     _log.setLevel(logging.INFO)
