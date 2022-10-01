@@ -1,14 +1,18 @@
 from dataclasses import dataclass
+from enum import Enum
 import http.client
 import io
 import json
 import logging
-from enum import Enum
 import os
 import pickletools
+from tarfile import TarError
 from typing import List, Set, Tuple
 import urllib.parse
 import zipfile
+
+from .torch import get_magic_number, InvalidMagicError, _is_zipfile, MAGIC_NUMBER, _should_read_directly
+
 
 class SafetyLevel(Enum):
     Innocuous = "innocuous"
@@ -45,7 +49,7 @@ _safe_globals = {
         "torch._utils": {"_rebuild_tensor_v2"},
 }
 
-_suspicious_globals = {
+_unsafe_globals = {
     "__builtin__": {"eval", "compile", "getattr", "apply", "exec", "open", "breakpoint"},  # Pickle versions 0, 1, 2 have those function under '__builtin__'
     "builtins": {"eval", "compile", "getattr", "apply", "exec", "open", "breakpoint"},  # Pickle versions 3, 4 have those function under 'builtins'
     "webbrowser": "*",  # Includes webbrowser.open()
@@ -81,10 +85,9 @@ _suspicious_globals = {
 # https://www.tensorflow.org/api_docs/python/tf/keras/models/load_model
 #
 
-_joblib_file_extensions = {".joblib"}
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib"}
-_zip_file_extensions = {".zip", ".bin", ".npz"}  # PyTorch's pytorch_model.bin are zip archives
+_zip_file_extensions = {".zip", ".npz"}  # PyTorch's pytorch_model.bin are zip archives
 
 
 def _http_get(url):
@@ -107,13 +110,12 @@ def _http_get(url):
         conn.close()
 
 
-def _list_globals(data) -> Set[Tuple[str, str]]:
+def _list_globals(data: io.BytesIO) -> Set[Tuple[str, str]]:
 
     globals = set()
 
     # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
     pos = -1
-    data = io.BytesIO(data)
     while pos < data.tell():
         pos = data.tell()
 
@@ -148,7 +150,7 @@ def _list_globals(data) -> Set[Tuple[str, str]]:
     return globals
 
 
-def scan_pickle_bytes(data, file_id) -> ScanResult:
+def scan_pickle_bytes(data: io.BytesIO, file_id) -> ScanResult:
     """Disassemble a Pickle stream and report issues"""
 
     globals = []
@@ -159,8 +161,8 @@ def scan_pickle_bytes(data, file_id) -> ScanResult:
     for rg in raw_globals:
         g = Global(rg[0], rg[1], SafetyLevel.Dangerous)
         safe_filter = _safe_globals.get(g.module)
-        danger_filter = _suspicious_globals.get(g.module)
-        if danger_filter is not None and (danger_filter == "*" or g.name in danger_filter):
+        unsafe_filter = _unsafe_globals.get(g.module)
+        if unsafe_filter is not None and (unsafe_filter == "*" or g.name in unsafe_filter):
             g.safety = SafetyLevel.Dangerous
             _log.warning("%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name)
             issues_count += 1
@@ -173,23 +175,57 @@ def scan_pickle_bytes(data, file_id) -> ScanResult:
     return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0)
 
 
-def scan_zip_bytes(data, file_id) -> ScanResult:
+def scan_zip_bytes(data: io.BytesIO, file_id) -> ScanResult:
     result = ScanResult([])
 
-    with zipfile.ZipFile(io.BytesIO(data), "r") as zip:
+    with zipfile.ZipFile(data, "r") as zip:
         file_names = zip.namelist()
         _log.debug("Files in archive %s: %s", file_id, file_names)
         for file_name in file_names:
             if os.path.splitext(file_name)[1] in _pickle_file_extensions:
                 _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                 with zip.open(file_name, "r") as file:
-                    result.merge(scan_pickle_bytes(file.read(), f"{file_id}:{file_name}"))
+                    file_data = io.BytesIO(file.read())
+                    result.merge(scan_pickle_bytes(file_data, f"{file_id}:{file_name}"))
 
     return result
 
 
+def scan_pytorch(data, file_id) -> ScanResult:
+    io_bytes = io.BytesIO(data)
+    # new pytorch format
+    if _is_zipfile(io_bytes):
+        return scan_zip_bytes(data, file_id)
+    # old pytorch format
+    else:
+        scan_result = ScanResult([])
+        should_read_directly = _should_read_directly(io_bytes)
+        if should_read_directly and io_bytes.tell() == 0:
+            # try loading from tar
+            try:
+                # TODO: implement loading from tar
+                raise TarError()
+            except TarError:
+                # file does not contain a tar
+                io_bytes.seek(0)
+
+        magic = get_magic_number(io_bytes)
+        if magic != MAGIC_NUMBER:
+            raise InvalidMagicError(magic, MAGIC_NUMBER)
+        # XXX:
+        #   I know this is strange, but somehow
+        #   there are five pickle serialised in a row.
+        #   I've checked the source code and tested
+        #   unpickling manually and five seems
+        #   to be the number.
+        for _ in range(5):
+            scan_result.merge(scan_pickle_bytes(io_bytes, file_id))
+        scan_result.scanned_files = 1
+        return scan_result
+
+
 def scan_bytes(data, file_id) -> ScanResult:
-    return scan_zip_bytes(data, file_id) if zipfile.is_zipfile(io.BytesIO(data)) else scan_pickle_bytes(data, file_id)
+    return scan_zip_bytes(io.BytesIO(data), file_id) if zipfile.is_zipfile(io.BytesIO(data)) else scan_pickle_bytes(io.BytesIO(data), file_id)
 
 
 def scan_huggingface_model(repo_id):
@@ -201,11 +237,15 @@ def scan_huggingface_model(repo_id):
     scan_result = ScanResult([])
     for file_name in file_names:
         file_ext = os.path.splitext(file_name)[1]
-        if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions:
+        if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions and file_ext not in _pytorch_file_extensions:
             continue
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
         url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
-        scan_result.merge(scan_bytes(_http_get(url), url))
+        data = _http_get(url)
+        if file_ext in _pytorch_file_extensions:
+            scan_result.merge(scan_pytorch(data, url))
+        else:
+            scan_result.merge(scan_bytes(data, url))
 
     return scan_result
 
@@ -216,13 +256,16 @@ def scan_directory_path(path) -> ScanResult:
     for base_path, _, file_names in os.walk(path):
         for file_name in file_names:
             file_ext = os.path.splitext(file_name)[1]
-            if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions:
+            if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions and file_ext not in _pytorch_file_extensions:
                 continue
             file_path = os.path.join(base_path, file_name)
             _log.debug("Scanning file %s", file_path)
             with open(file_path, "rb") as file:
                 data = file.read()
-            scan_result.merge(scan_bytes(data, file_path))
+            if file_ext in _pytorch_file_extensions:
+                scan_result.merge(scan_pytorch(data, file_path))
+            else:
+                scan_result.merge(scan_bytes(data, file_path))
 
     return scan_result
 
