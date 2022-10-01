@@ -10,8 +10,9 @@ import zipfile
 import pytest
 import requests
 import aiohttp
+from picklescan.cli import main
 from picklescan.scanner import _http_get, _list_globals, scan_pickle_bytes, scan_zip_bytes,\
-    scan_directory_path, scan_file_path, scan_url, scan_huggingface_model, main
+    scan_directory_path, scan_file_path, scan_url, scan_huggingface_model
 
 _root_path = os.path.dirname(__file__)
 
