@@ -7,7 +7,7 @@ import logging
 import os
 import pickletools
 from tarfile import TarError
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 
@@ -191,25 +191,24 @@ def scan_zip_bytes(data: io.BytesIO, file_id) -> ScanResult:
     return result
 
 
-def scan_pytorch(data, file_id) -> ScanResult:
-    io_bytes = io.BytesIO(data)
+def scan_pytorch(data: io.BytesIO, file_id) -> ScanResult:
     # new pytorch format
-    if _is_zipfile(io_bytes):
+    if _is_zipfile(data):
         return scan_zip_bytes(data, file_id)
     # old pytorch format
     else:
         scan_result = ScanResult([])
-        should_read_directly = _should_read_directly(io_bytes)
-        if should_read_directly and io_bytes.tell() == 0:
+        should_read_directly = _should_read_directly(data)
+        if should_read_directly and data.tell() == 0:
             # try loading from tar
             try:
                 # TODO: implement loading from tar
                 raise TarError()
             except TarError:
                 # file does not contain a tar
-                io_bytes.seek(0)
+                data.seek(0)
 
-        magic = get_magic_number(io_bytes)
+        magic = get_magic_number(data)
         if magic != MAGIC_NUMBER:
             raise InvalidMagicError(magic, MAGIC_NUMBER)
         # XXX:
@@ -219,14 +218,16 @@ def scan_pytorch(data, file_id) -> ScanResult:
         #   unpickling manually and five seems
         #   to be the number.
         for _ in range(5):
-            scan_result.merge(scan_pickle_bytes(io_bytes, file_id))
+            scan_result.merge(scan_pickle_bytes(data, file_id))
         scan_result.scanned_files = 1
         return scan_result
 
 
-def scan_bytes(data, file_id) -> ScanResult:
-    return scan_zip_bytes(io.BytesIO(data), file_id) if zipfile.is_zipfile(io.BytesIO(data)) else scan_pickle_bytes(io.BytesIO(data), file_id)
-
+def scan_bytes(data: bytes, file_id, file_ext: Optional[str] = None) -> ScanResult:
+    if file_ext is not None and file_ext in _pytorch_file_extensions:
+        return scan_pytorch(io.BytesIO(data), file_id)
+    else:
+        return scan_zip_bytes(io.BytesIO(data), file_id) if zipfile.is_zipfile(io.BytesIO(data)) else scan_pickle_bytes(io.BytesIO(data), file_id)
 
 def scan_huggingface_model(repo_id):
     # List model files
@@ -242,10 +243,7 @@ def scan_huggingface_model(repo_id):
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
         url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
         data = _http_get(url)
-        if file_ext in _pytorch_file_extensions:
-            scan_result.merge(scan_pytorch(data, url))
-        else:
-            scan_result.merge(scan_bytes(data, url))
+        scan_result.merge(scan_bytes(data, url, file_ext))
 
     return scan_result
 
@@ -262,18 +260,16 @@ def scan_directory_path(path) -> ScanResult:
             _log.debug("Scanning file %s", file_path)
             with open(file_path, "rb") as file:
                 data = file.read()
-            if file_ext in _pytorch_file_extensions:
-                scan_result.merge(scan_pytorch(data, file_path))
-            else:
-                scan_result.merge(scan_bytes(data, file_path))
+            scan_result.merge(scan_bytes(data, file_path, file_ext))
 
     return scan_result
 
 
 def scan_file_path(path) -> ScanResult:
+    file_ext = os.path.splitext(path)[1]
     with open(path, "rb") as file:
         data = file.read()
-    return scan_bytes(data, path)
+    return scan_bytes(data, path, file_ext)
 
 
 def scan_url(url) -> ScanResult:
