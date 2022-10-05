@@ -43,6 +43,7 @@ def _should_read_directly(f):
         return False
 
 
+# copied from pytorch code
 def _is_zipfile(f) -> bool:
     # This is a stricter implementation than zipfile.is_zipfile().
     # zipfile.is_zipfile() is True if the magic number appears anywhere in the
