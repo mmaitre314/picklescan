@@ -13,8 +13,20 @@ from unittest import TestCase
 import zipfile
 
 from picklescan.cli import main
-from picklescan.scanner import Global, SafetyLevel, ScanResult, _http_get, _list_globals, scan_pickle_bytes, scan_zip_bytes,\
-    scan_directory_path, scan_file_path, scan_url, scan_huggingface_model, scan_pytorch
+from picklescan.scanner import (
+    Global,
+    SafetyLevel,
+    ScanResult,
+    _http_get,
+    _list_globals,
+    scan_pickle_bytes,
+    scan_zip_bytes,
+    scan_directory_path,
+    scan_file_path,
+    scan_url,
+    scan_huggingface_model,
+    scan_pytorch,
+)
 
 
 _root_path = os.path.dirname(__file__)
@@ -35,7 +47,9 @@ class Malicious3:
         return http.client.HTTPSConnection, ("github.com",)
 
 
-malicious3_pickle_bytes = pickle.dumps(Malicious3(), protocol=0)  # Malicious3 needs to be pickled before HTTPSConnection is mocked below
+malicious3_pickle_bytes = pickle.dumps(
+    Malicious3(), protocol=0
+)  # Malicious3 needs to be pickled before HTTPSConnection is mocked below
 
 
 class Malicious4:
@@ -99,9 +113,17 @@ class MockHTTPSConnection:
             with zipfile.ZipFile(buffer, "w") as zip:
                 zip.writestr("data.pkl", pickle.dumps(Malicious1()))
             self.response = HTTPResponse(200, buffer.getbuffer())
-        elif target == "GET https://huggingface.co/api/models/ykilcher/totally-harmless-model":
-            self.response = HTTPResponse(200, b'{"siblings": [{"rfilename": "pytorch_model.bin"}]}')
-        elif target == "GET https://huggingface.co/ykilcher/totally-harmless-model/resolve/main/pytorch_model.bin":
+        elif (
+            target
+            == "GET https://huggingface.co/api/models/ykilcher/totally-harmless-model"
+        ):
+            self.response = HTTPResponse(
+                200, b'{"siblings": [{"rfilename": "pytorch_model.bin"}]}'
+            )
+        elif (
+            target
+            == "GET https://huggingface.co/ykilcher/totally-harmless-model/resolve/main/pytorch_model.bin"
+        ):
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, "w") as zip:
                 zip.writestr("archive/data.pkl", pickle.dumps(Malicious1()))
@@ -146,26 +168,40 @@ def initialize_pickle_files():
     # - Pickle versions 0, 1, 2 have built-in functions under '__builtin__' while versions 3 and 4 have them under 'builtins'
     # - Pickle versions 0, 1, 2, 3 use 'GLOBAL' opcode while 4 uses 'STACK_GLOBAL' opcode
     for version in (0, 3, 4):
-        initialize_pickle_file(f"{_root_path}/data/benign0_v{version}.pkl", ["a", "b", "c"], version)
-        initialize_pickle_file(f"{_root_path}/data/malicious1_v{version}.pkl", Malicious1(), version)
-        initialize_pickle_file(f"{_root_path}/data/malicious2_v{version}.pkl", Malicious2(), version)
+        initialize_pickle_file(
+            f"{_root_path}/data/benign0_v{version}.pkl", ["a", "b", "c"], version
+        )
+        initialize_pickle_file(
+            f"{_root_path}/data/malicious1_v{version}.pkl", Malicious1(), version
+        )
+        initialize_pickle_file(
+            f"{_root_path}/data/malicious2_v{version}.pkl", Malicious2(), version
+        )
 
     # Malicious Pickle from https://sensepost.com/cms/resources/conferences/2011/sour_pickles/BH_US_11_Slaviero_Sour_Pickles.pdf
     initialize_data_file(
         f"{_root_path}/data/malicious0.pkl",
-        b"c__builtin__\nglobals\n(tRp100\n0c__builtin__\ncompile\n(S\'fl=open(\"/etc/passwd\");picklesmashed=fl.read();" +
-        b"\'\nS\'\'\nS\'exec\'\ntRp101\n0c__builtin__\neval\n(g101\ng100\ntRp102\n0c__builtin__\ngetattr\n(c__builtin__\n" +
-        b"dict\nS\'get\'\ntRp103\n0c__builtin__\napply\n(g103\n(g100\nS\'picklesmashed\'\nltRp104\n0g104\n.")
+        b'c__builtin__\nglobals\n(tRp100\n0c__builtin__\ncompile\n(S\'fl=open("/etc/passwd");picklesmashed=fl.read();'
+        + b"'\nS''\nS'exec'\ntRp101\n0c__builtin__\neval\n(g101\ng100\ntRp102\n0c__builtin__\ngetattr\n(c__builtin__\n"
+        + b"dict\nS'get'\ntRp103\n0c__builtin__\napply\n(g103\n(g100\nS'picklesmashed'\nltRp104\n0g104\n.",
+    )
 
     initialize_data_file(f"{_root_path}/data/malicious3.pkl", malicious3_pickle_bytes)
     initialize_pickle_file(f"{_root_path}/data/malicious4.pickle", Malicious4(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious5.pickle", Malicious5(), 4)
-    initialize_data_file(f"{_root_path}/data/malicious6.pkl", pickle.dumps(["a", "b", "c"]) + pickle.dumps(Malicious4()))
+    initialize_data_file(
+        f"{_root_path}/data/malicious6.pkl",
+        pickle.dumps(["a", "b", "c"]) + pickle.dumps(Malicious4()),
+    )
     initialize_pickle_file(f"{_root_path}/data/malicious7.pkl", Malicious6(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious8.pkl", Malicious7(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious9.pkl", Malicious8(), 4)
 
-    initialize_zip_file(f"{_root_path}/data/malicious1.zip", "data.pkl", pickle.dumps(Malicious1(), protocol=4))
+    initialize_zip_file(
+        f"{_root_path}/data/malicious1.zip",
+        "data.pkl",
+        pickle.dumps(Malicious1(), protocol=4),
+    )
 
 
 initialize_pickle_files()
@@ -187,11 +223,15 @@ def test_http_get():
 
 
 def test_list_globals():
-    assert _list_globals(io.BytesIO(pickle.dumps(Malicious1()))) == {('builtins', 'eval')}
+    assert _list_globals(io.BytesIO(pickle.dumps(Malicious1()))) == {
+        ("builtins", "eval")
+    }
 
 
 def test_scan_pickle_bytes():
-    assert scan_pickle_bytes(io.BytesIO(pickle.dumps(Malicious1())), "file.pkl") == ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
+    assert scan_pickle_bytes(
+        io.BytesIO(pickle.dumps(Malicious1())), "file.pkl"
+    ) == ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
 
 
 def test_scan_zip_bytes():
@@ -200,64 +240,180 @@ def test_scan_zip_bytes():
     with zipfile.ZipFile(buffer, "w") as zip:
         zip.writestr("data.pkl", pickle.dumps(Malicious1()))
 
-    assert scan_zip_bytes(io.BytesIO(buffer.getbuffer()), "test.zip") == ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
+    assert scan_zip_bytes(io.BytesIO(buffer.getbuffer()), "test.zip") == ScanResult(
+        [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
+    )
 
 
 def test_scan_pytorch():
-    scan_result = ScanResult([Global('torch', 'FloatStorage', SafetyLevel.Innocuous), Global('collections', 'OrderedDict', SafetyLevel.Innocuous), Global('torch._utils', '_rebuild_tensor_v2', SafetyLevel.Innocuous)], 1, 0, 0)
+    scan_result = ScanResult(
+        [
+            Global("torch", "FloatStorage", SafetyLevel.Innocuous),
+            Global("collections", "OrderedDict", SafetyLevel.Innocuous),
+            Global("torch._utils", "_rebuild_tensor_v2", SafetyLevel.Innocuous),
+        ],
+        1,
+        0,
+        0,
+    )
     with open(f"{_root_path}/data/pytorch_model.bin", "rb") as f:
-        compare_scan_results(scan_pytorch(io.BytesIO(f.read()), "pytorch_model.bin"), scan_result)
+        compare_scan_results(
+            scan_pytorch(io.BytesIO(f.read()), "pytorch_model.bin"), scan_result
+        )
     with open(f"{_root_path}/data/new_pytorch_model.bin", "rb") as f:
-        compare_scan_results(scan_pytorch(io.BytesIO(f.read()), "pytorch_model.bin"), scan_result)
+        compare_scan_results(
+            scan_pytorch(io.BytesIO(f.read()), "pytorch_model.bin"), scan_result
+        )
 
 
 def test_scan_file_path():
     safe = ScanResult([], 1, 0, 0)
     compare_scan_results(scan_file_path(f"{_root_path}/data/benign0_v3.pkl"), safe)
 
-    pytorch = ScanResult([Global('torch', 'FloatStorage', SafetyLevel.Innocuous), Global('collections', 'OrderedDict', SafetyLevel.Innocuous), Global('torch._utils', '_rebuild_tensor_v2', SafetyLevel.Innocuous)], 1, 0, 0)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/pytorch_model.bin"), pytorch)
+    pytorch = ScanResult(
+        [
+            Global("torch", "FloatStorage", SafetyLevel.Innocuous),
+            Global("collections", "OrderedDict", SafetyLevel.Innocuous),
+            Global("torch._utils", "_rebuild_tensor_v2", SafetyLevel.Innocuous),
+        ],
+        1,
+        0,
+        0,
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/pytorch_model.bin"), pytorch
+    )
 
-    malicious0 = ScanResult([Global('__builtin__', 'compile', SafetyLevel.Dangerous), Global('__builtin__', 'globals', SafetyLevel.Suspicious), Global('__builtin__', 'dict', SafetyLevel.Suspicious), Global('__builtin__', 'apply', SafetyLevel.Dangerous), Global('__builtin__', 'getattr', SafetyLevel.Dangerous), Global('__builtin__', 'eval', SafetyLevel.Dangerous)], 1, 4, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious0.pkl"), malicious0)
+    malicious0 = ScanResult(
+        [
+            Global("__builtin__", "compile", SafetyLevel.Dangerous),
+            Global("__builtin__", "globals", SafetyLevel.Suspicious),
+            Global("__builtin__", "dict", SafetyLevel.Suspicious),
+            Global("__builtin__", "apply", SafetyLevel.Dangerous),
+            Global("__builtin__", "getattr", SafetyLevel.Dangerous),
+            Global("__builtin__", "eval", SafetyLevel.Dangerous),
+        ],
+        1,
+        4,
+        1,
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious0.pkl"), malicious0
+    )
 
-    malicious1_v0 = ScanResult([Global('__builtin__', 'eval', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_v0.pkl"), malicious1_v0)
+    malicious1_v0 = ScanResult(
+        [Global("__builtin__", "eval", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious1_v0.pkl"), malicious1_v0
+    )
 
-    malicious1 = ScanResult([Global('builtins', 'eval', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_v3.pkl"), malicious1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_v4.pkl"), malicious1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1.zip"), malicious1)
+    malicious1 = ScanResult(
+        [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious1_v3.pkl"), malicious1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious1_v4.pkl"), malicious1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious1.zip"), malicious1
+    )
 
-    malicious2 = ScanResult([Global('posix', 'system', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious2_v0.pkl"), malicious2)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious2_v3.pkl"), malicious2)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious2_v4.pkl"), malicious2)
+    malicious2 = ScanResult([Global("posix", "system", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious2_v0.pkl"), malicious2
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious2_v3.pkl"), malicious2
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious2_v4.pkl"), malicious2
+    )
 
-    malicious3 = ScanResult([Global('httplib', 'HTTPSConnection', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious3.pkl"), malicious3)
+    malicious3 = ScanResult(
+        [Global("httplib", "HTTPSConnection", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious3.pkl"), malicious3
+    )
 
-    malicious4 = ScanResult([Global('requests.api', 'get', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious4.pickle"), malicious4)
+    malicious4 = ScanResult(
+        [Global("requests.api", "get", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious4.pickle"), malicious4
+    )
 
-    malicious5 = ScanResult([Global('aiohttp.client', 'ClientSession', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious5.pickle"), malicious5)
+    malicious5 = ScanResult(
+        [Global("aiohttp.client", "ClientSession", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious5.pickle"), malicious5
+    )
 
-    malicious6 = ScanResult([Global('requests.api', 'get', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious6.pkl"), malicious6)
+    malicious6 = ScanResult(
+        [Global("requests.api", "get", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious6.pkl"), malicious6
+    )
 
-    malicious7 = ScanResult([Global('socket', 'create_connection', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious7.pkl"), malicious7)
+    malicious7 = ScanResult(
+        [Global("socket", "create_connection", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious7.pkl"), malicious7
+    )
 
-    malicious8 = ScanResult([Global('subprocess', 'run', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious8.pkl"), malicious8)
+    malicious8 = ScanResult(
+        [Global("subprocess", "run", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious8.pkl"), malicious8
+    )
 
-    malicious9 = ScanResult([Global('sys', 'exit', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious9.pkl"), malicious9)
+    malicious9 = ScanResult([Global("sys", "exit", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious9.pkl"), malicious9
+    )
 
 
 def test_scan_directory_path():
-    sr  = ScanResult([Global('builtins', 'eval', SafetyLevel.Dangerous), Global('httplib', 'HTTPSConnection', SafetyLevel.Dangerous), Global('collections', 'OrderedDict', SafetyLevel.Innocuous), Global('torch._utils', '_rebuild_tensor_v2', SafetyLevel.Innocuous), Global('torch', 'FloatStorage', SafetyLevel.Innocuous), Global('subprocess', 'run', SafetyLevel.Dangerous), Global('posix', 'system', SafetyLevel.Dangerous), Global('posix', 'system', SafetyLevel.Dangerous), Global('requests.api', 'get', SafetyLevel.Dangerous), Global('posix', 'system', SafetyLevel.Dangerous), Global('aiohttp.client', 'ClientSession', SafetyLevel.Dangerous), Global('__builtin__', 'eval', SafetyLevel.Dangerous), Global('sys', 'exit', SafetyLevel.Dangerous), Global('__builtin__', 'eval', SafetyLevel.Dangerous), Global('__builtin__', 'compile', SafetyLevel.Dangerous), Global('__builtin__', 'dict', SafetyLevel.Suspicious), Global('__builtin__', 'apply', SafetyLevel.Dangerous), Global('__builtin__', 'getattr', SafetyLevel.Dangerous), Global('__builtin__', 'globals', SafetyLevel.Suspicious), Global('requests.api', 'get', SafetyLevel.Dangerous), Global('builtins', 'eval', SafetyLevel.Dangerous), Global('builtins', 'eval', SafetyLevel.Dangerous), Global('socket', 'create_connection', SafetyLevel.Dangerous), Global('collections', 'OrderedDict', SafetyLevel.Innocuous), Global('torch._utils', '_rebuild_tensor_v2', SafetyLevel.Innocuous), Global('torch', 'FloatStorage', SafetyLevel.Innocuous)], 20, 18, 15)
+    sr = ScanResult(
+        [
+            Global("builtins", "eval", SafetyLevel.Dangerous),
+            Global("httplib", "HTTPSConnection", SafetyLevel.Dangerous),
+            Global("collections", "OrderedDict", SafetyLevel.Innocuous),
+            Global("torch._utils", "_rebuild_tensor_v2", SafetyLevel.Innocuous),
+            Global("torch", "FloatStorage", SafetyLevel.Innocuous),
+            Global("subprocess", "run", SafetyLevel.Dangerous),
+            Global("posix", "system", SafetyLevel.Dangerous),
+            Global("posix", "system", SafetyLevel.Dangerous),
+            Global("requests.api", "get", SafetyLevel.Dangerous),
+            Global("posix", "system", SafetyLevel.Dangerous),
+            Global("aiohttp.client", "ClientSession", SafetyLevel.Dangerous),
+            Global("__builtin__", "eval", SafetyLevel.Dangerous),
+            Global("sys", "exit", SafetyLevel.Dangerous),
+            Global("__builtin__", "eval", SafetyLevel.Dangerous),
+            Global("__builtin__", "compile", SafetyLevel.Dangerous),
+            Global("__builtin__", "dict", SafetyLevel.Suspicious),
+            Global("__builtin__", "apply", SafetyLevel.Dangerous),
+            Global("__builtin__", "getattr", SafetyLevel.Dangerous),
+            Global("__builtin__", "globals", SafetyLevel.Suspicious),
+            Global("requests.api", "get", SafetyLevel.Dangerous),
+            Global("builtins", "eval", SafetyLevel.Dangerous),
+            Global("builtins", "eval", SafetyLevel.Dangerous),
+            Global("socket", "create_connection", SafetyLevel.Dangerous),
+            Global("collections", "OrderedDict", SafetyLevel.Innocuous),
+            Global("torch._utils", "_rebuild_tensor_v2", SafetyLevel.Innocuous),
+            Global("torch", "FloatStorage", SafetyLevel.Innocuous),
+        ],
+        20,
+        18,
+        15,
+    )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 
 
@@ -266,16 +422,22 @@ def test_scan_url():
     compare_scan_results(scan_url("https://localhost/mock/pickle/benign"), safe)
     compare_scan_results(scan_url("https://localhost/mock/zip/benign"), safe)
 
-    malicious = ScanResult([Global('posix', 'system', SafetyLevel.Dangerous)], 1, 1, 1)
+    malicious = ScanResult([Global("posix", "system", SafetyLevel.Dangerous)], 1, 1, 1)
     compare_scan_results(scan_url("https://localhost/mock/pickle/malicious"), malicious)
 
-    malicious_zip = ScanResult([Global('builtins', 'eval', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_url("https://localhost/mock/zip/malicious"), malicious_zip)
+    malicious_zip = ScanResult(
+        [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_url("https://localhost/mock/zip/malicious"), malicious_zip
+    )
 
 
 def test_scan_huggingface_model():
-    eval_sr = ScanResult([Global('builtins', 'eval', SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(scan_huggingface_model("ykilcher/totally-harmless-model"), eval_sr)
+    eval_sr = ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(
+        scan_huggingface_model("ykilcher/totally-harmless-model"), eval_sr
+    )
 
 
 def test_main():
