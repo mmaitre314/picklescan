@@ -11,7 +11,13 @@ from typing import List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 
-from .torch import get_magic_number, InvalidMagicError, _is_zipfile, MAGIC_NUMBER, _should_read_directly
+from .torch import (
+    get_magic_number,
+    InvalidMagicError,
+    _is_zipfile,
+    MAGIC_NUMBER,
+    _should_read_directly,
+)
 
 
 class SafetyLevel(Enum):
@@ -44,14 +50,48 @@ class ScanResult:
 _log = logging.getLogger("picklescan")
 
 _safe_globals = {
-        "collections": {"OrderedDict"},
-        "torch": {"LongStorage", "FloatStorage", "HalfStorage", "QUInt2x4Storage", "QUInt4x2Storage", "QInt32Storage", "QInt8Storage", "QUInt8Storage", "ComplexFloatStorage", "ComplexDoubleStorage", "DoubleStorage", "BFloat16Storage", "BoolStorage", "CharStorage", "ShortStorage", "IntStorage", "ByteStorage"},
-        "torch._utils": {"_rebuild_tensor_v2"},
+    "collections": {"OrderedDict"},
+    "torch": {
+        "LongStorage",
+        "FloatStorage",
+        "HalfStorage",
+        "QUInt2x4Storage",
+        "QUInt4x2Storage",
+        "QInt32Storage",
+        "QInt8Storage",
+        "QUInt8Storage",
+        "ComplexFloatStorage",
+        "ComplexDoubleStorage",
+        "DoubleStorage",
+        "BFloat16Storage",
+        "BoolStorage",
+        "CharStorage",
+        "ShortStorage",
+        "IntStorage",
+        "ByteStorage",
+    },
+    "torch._utils": {"_rebuild_tensor_v2"},
 }
 
 _unsafe_globals = {
-    "__builtin__": {"eval", "compile", "getattr", "apply", "exec", "open", "breakpoint"},  # Pickle versions 0, 1, 2 have those function under '__builtin__'
-    "builtins": {"eval", "compile", "getattr", "apply", "exec", "open", "breakpoint"},  # Pickle versions 3, 4 have those function under 'builtins'
+    "__builtin__": {
+        "eval",
+        "compile",
+        "getattr",
+        "apply",
+        "exec",
+        "open",
+        "breakpoint",
+    },  # Pickle versions 0, 1, 2 have those function under '__builtin__'
+    "builtins": {
+        "eval",
+        "compile",
+        "getattr",
+        "apply",
+        "exec",
+        "open",
+        "breakpoint",
+    },  # Pickle versions 3, 4 have those function under 'builtins'
     "webbrowser": "*",  # Includes webbrowser.open()
     "httplib": "*",  # Includes http.client.HTTPSConnection()
     "requests.api": "*",
@@ -94,7 +134,9 @@ def _http_get(url):
     _log.debug(f"Request: GET {url}")
 
     parsed_url = urllib.parse.urlparse(url)
-    path_and_query = parsed_url.path + ("?" + parsed_url.query if len(parsed_url.query) > 0 else "")
+    path_and_query = parsed_url.path + (
+        "?" + parsed_url.query if len(parsed_url.query) > 0 else ""
+    )
 
     conn = http.client.HTTPSConnection(parsed_url.netloc)
     try:
@@ -104,7 +146,9 @@ def _http_get(url):
         if response.status == 302:  # Follow redirections
             return _http_get(response.headers["Location"])
         elif response.status >= 400:
-            raise RuntimeError(f"HTTP {response.status} ({response.reason}) calling GET {parsed_url.scheme}://{parsed_url.netloc}{path_and_query}")
+            raise RuntimeError(
+                f"HTTP {response.status} ({response.reason}) calling GET {parsed_url.scheme}://{parsed_url.netloc}{path_and_query}"
+            )
         return response.read()
     finally:
         conn.close()
@@ -136,15 +180,19 @@ def _list_globals(data: io.BytesIO) -> Set[Tuple[str, str]]:
             elif op_name == "STACK_GLOBAL":
                 values = []
                 for offset in range(1, n):
-                    if ops[n-offset][0].name == "MEMOIZE":
+                    if ops[n - offset][0].name == "MEMOIZE":
                         continue
-                    if ops[n-offset][0].name != "SHORT_BINUNICODE":
-                        raise TypeError(f"Unhandled op-code type {ops[n-offset][0].name} at position {n-offset}")
-                    values.append(ops[n-offset][1])
+                    if ops[n - offset][0].name != "SHORT_BINUNICODE":
+                        raise TypeError(
+                            f"Unhandled op-code type {ops[n-offset][0].name} at position {n-offset}"
+                        )
+                    values.append(ops[n - offset][1])
                     if len(values) == 2:
                         break
                 if len(values) != 2:
-                    raise ValueError(f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2.")
+                    raise ValueError(
+                        f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2."
+                    )
                 globals.add((values[1], values[0]))
 
     return globals
@@ -162,9 +210,13 @@ def scan_pickle_bytes(data: io.BytesIO, file_id) -> ScanResult:
         g = Global(rg[0], rg[1], SafetyLevel.Dangerous)
         safe_filter = _safe_globals.get(g.module)
         unsafe_filter = _unsafe_globals.get(g.module)
-        if unsafe_filter is not None and (unsafe_filter == "*" or g.name in unsafe_filter):
+        if unsafe_filter is not None and (
+            unsafe_filter == "*" or g.name in unsafe_filter
+        ):
             g.safety = SafetyLevel.Dangerous
-            _log.warning("%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name)
+            _log.warning(
+                "%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name
+            )
             issues_count += 1
         elif safe_filter is not None and (safe_filter == "*" or g.name in safe_filter):
             g.safety = SafetyLevel.Innocuous
@@ -227,18 +279,33 @@ def scan_bytes(data: bytes, file_id, file_ext: Optional[str] = None) -> ScanResu
     if file_ext is not None and file_ext in _pytorch_file_extensions:
         return scan_pytorch(io.BytesIO(data), file_id)
     else:
-        return scan_zip_bytes(io.BytesIO(data), file_id) if zipfile.is_zipfile(io.BytesIO(data)) else scan_pickle_bytes(io.BytesIO(data), file_id)
+        return (
+            scan_zip_bytes(io.BytesIO(data), file_id)
+            if zipfile.is_zipfile(io.BytesIO(data))
+            else scan_pickle_bytes(io.BytesIO(data), file_id)
+        )
+
 
 def scan_huggingface_model(repo_id):
     # List model files
-    model = json.loads(_http_get(f"https://huggingface.co/api/models/{repo_id}").decode("utf-8"))
-    file_names = [file_name for file_name in (sibling.get("rfilename") for sibling in model["siblings"]) if file_name is not None]
+    model = json.loads(
+        _http_get(f"https://huggingface.co/api/models/{repo_id}").decode("utf-8")
+    )
+    file_names = [
+        file_name
+        for file_name in (sibling.get("rfilename") for sibling in model["siblings"])
+        if file_name is not None
+    ]
 
     # Scan model files
     scan_result = ScanResult([])
     for file_name in file_names:
         file_ext = os.path.splitext(file_name)[1]
-        if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions and file_ext not in _pytorch_file_extensions:
+        if (
+            file_ext not in _zip_file_extensions
+            and file_ext not in _pickle_file_extensions
+            and file_ext not in _pytorch_file_extensions
+        ):
             continue
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
         url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
@@ -254,7 +321,11 @@ def scan_directory_path(path) -> ScanResult:
     for base_path, _, file_names in os.walk(path):
         for file_name in file_names:
             file_ext = os.path.splitext(file_name)[1]
-            if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions and file_ext not in _pytorch_file_extensions:
+            if (
+                file_ext not in _zip_file_extensions
+                and file_ext not in _pickle_file_extensions
+                and file_ext not in _pytorch_file_extensions
+            ):
                 continue
             file_path = os.path.join(base_path, file_name)
             _log.debug("Scanning file %s", file_path)
@@ -274,4 +345,3 @@ def scan_file_path(path) -> ScanResult:
 
 def scan_url(url) -> ScanResult:
     return scan_bytes(_http_get(url), url)
-

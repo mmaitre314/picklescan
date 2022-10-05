@@ -4,7 +4,7 @@ from typing import Optional
 
 
 class InvalidMagicError(Exception):
-    def __init__(self, provided_magic: Optional[int], magic:int):
+    def __init__(self, provided_magic: Optional[int], magic: int):
         self.provided_magic = provided_magic
         self.magic = magic
         super().__init__()
@@ -15,13 +15,13 @@ class InvalidMagicError(Exception):
 
 # copied from pytorch code
 # https://github.com/pytorch/pytorch/blob/664058fa83f1d8eede5d66418abff6e20bd76ca8/torch/serialization.py#L28
-MAGIC_NUMBER = 0x1950a86a20f9469cfc6c
+MAGIC_NUMBER = 0x1950A86A20F9469CFC6C
 
 
 # copied from pytorch code
 # https://github.com/pytorch/pytorch/blob/664058fa83f1d8eede5d66418abff6e20bd76ca8/torch/serialization.py#L272
 def _is_compressed_file(f) -> bool:
-    compress_modules = ['gzip']
+    compress_modules = ["gzip"]
     try:
         return f.__module__ in compress_modules
     except AttributeError:
@@ -68,7 +68,7 @@ def _is_zipfile(f) -> bool:
         byte = f.read(1)
     f.seek(start)
 
-    local_header_magic_number = [b'P', b'K', b'\x03', b'\x04']
+    local_header_magic_number = [b"P", b"K", b"\x03", b"\x04"]
     return read_bytes == local_header_magic_number
 
 
@@ -77,4 +77,3 @@ def get_magic_number(data: io.BytesIO) -> Optional[int]:
         if "INT" in opcode.name or "LONG" in opcode.name:
             return int(args)
     return None
-
