@@ -1,17 +1,55 @@
-import argparse
+from dataclasses import dataclass
+from enum import Enum
 import http.client
 import io
 import json
 import logging
 import os
 import pickletools
-import sys
+from tarfile import TarError
+from typing import List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 
+from .torch import get_magic_number, InvalidMagicError, _is_zipfile, MAGIC_NUMBER, _should_read_directly
+
+
+class SafetyLevel(Enum):
+    Innocuous = "innocuous"
+    Suspicious = "suspicious"
+    Dangerous = "dangerous"
+
+
+@dataclass
+class Global:
+    module: str
+    name: str
+    safety: SafetyLevel
+
+
+@dataclass
+class ScanResult:
+    globals: List[Global]
+    scanned_files: int = 0
+    issues_count: int = 0
+    infected_files: int = 0
+
+    def merge(self, sr: "ScanResult"):
+        self.globals.extend(sr.globals)
+        self.scanned_files += sr.scanned_files
+        self.issues_count += sr.issues_count
+        self.infected_files += sr.infected_files
+
+
 _log = logging.getLogger("picklescan")
 
-_suspicious_globals = {
+_safe_globals = {
+        "collections": {"OrderedDict"},
+        "torch": {"LongStorage", "FloatStorage", "HalfStorage", "QUInt2x4Storage", "QUInt4x2Storage", "QInt32Storage", "QInt8Storage", "QUInt8Storage", "ComplexFloatStorage", "ComplexDoubleStorage", "DoubleStorage", "BFloat16Storage", "BoolStorage", "CharStorage", "ShortStorage", "IntStorage", "ByteStorage"},
+        "torch._utils": {"_rebuild_tensor_v2"},
+}
+
+_unsafe_globals = {
     "__builtin__": {"eval", "compile", "getattr", "apply", "exec", "open", "breakpoint"},  # Pickle versions 0, 1, 2 have those function under '__builtin__'
     "builtins": {"eval", "compile", "getattr", "apply", "exec", "open", "breakpoint"},  # Pickle versions 3, 4 have those function under 'builtins'
     "webbrowser": "*",  # Includes webbrowser.open()
@@ -47,8 +85,9 @@ _suspicious_globals = {
 # https://www.tensorflow.org/api_docs/python/tf/keras/models/load_model
 #
 
+_pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib"}
-_zip_file_extensions = {".zip", ".bin"}  # PyTorch's pytorch_model.bin are zip archives
+_zip_file_extensions = {".zip", ".npz"}
 
 
 def _http_get(url):
@@ -71,13 +110,12 @@ def _http_get(url):
         conn.close()
 
 
-def _list_globals(data):
+def _list_globals(data: io.BytesIO) -> Set[Tuple[str, str]]:
 
     globals = set()
 
     # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
     pos = -1
-    data = io.BytesIO(data)
     while pos < data.tell():
         pos = data.tell()
 
@@ -112,40 +150,84 @@ def _list_globals(data):
     return globals
 
 
-def scan_pickle_bytes(data, file_id):
+def scan_pickle_bytes(data: io.BytesIO, file_id) -> ScanResult:
     """Disassemble a Pickle stream and report issues"""
 
-    globals = _list_globals(data)
-    _log.debug("Global imports in %s: %s", file_id, globals)
+    globals = []
+    raw_globals = _list_globals(data)
+    _log.debug("Global imports in %s: %s", file_id, raw_globals)
 
     issues_count = 0
-    for g in globals:
-        filter = _suspicious_globals.get(g[0])
-        if filter is not None and (filter == "*" or g[1] in filter):
-            _log.warning("%s: global import '%s %s' FOUND", file_id, g[0], g[1])
+    for rg in raw_globals:
+        g = Global(rg[0], rg[1], SafetyLevel.Dangerous)
+        safe_filter = _safe_globals.get(g.module)
+        unsafe_filter = _unsafe_globals.get(g.module)
+        if unsafe_filter is not None and (unsafe_filter == "*" or g.name in unsafe_filter):
+            g.safety = SafetyLevel.Dangerous
+            _log.warning("%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name)
             issues_count += 1
+        elif safe_filter is not None and (safe_filter == "*" or g.name in safe_filter):
+            g.safety = SafetyLevel.Innocuous
+        else:
+            g.safety = SafetyLevel.Suspicious
+        globals.append(g)
 
-    return issues_count
+    return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0)
 
 
-def scan_zip_bytes(data, file_id):
-    issues_count = 0
+def scan_zip_bytes(data: io.BytesIO, file_id) -> ScanResult:
+    result = ScanResult([])
 
-    with zipfile.ZipFile(io.BytesIO(data), "r") as zip:
+    with zipfile.ZipFile(data, "r") as zip:
         file_names = zip.namelist()
         _log.debug("Files in archive %s: %s", file_id, file_names)
         for file_name in file_names:
             if os.path.splitext(file_name)[1] in _pickle_file_extensions:
                 _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                 with zip.open(file_name, "r") as file:
-                    issues_count += scan_pickle_bytes(file.read(), f"{file_id}:{file_name}")
+                    file_data = io.BytesIO(file.read())
+                    result.merge(scan_pickle_bytes(file_data, f"{file_id}:{file_name}"))
 
-    return issues_count
+    return result
 
 
-def scan_bytes(data, file_id):
-    return scan_zip_bytes(data, file_id) if zipfile.is_zipfile(io.BytesIO(data)) else scan_pickle_bytes(data, file_id)
+def scan_pytorch(data: io.BytesIO, file_id) -> ScanResult:
+    # new pytorch format
+    if _is_zipfile(data):
+        return scan_zip_bytes(data, file_id)
+    # old pytorch format
+    else:
+        scan_result = ScanResult([])
+        should_read_directly = _should_read_directly(data)
+        if should_read_directly and data.tell() == 0:
+            # try loading from tar
+            try:
+                # TODO: implement loading from tar
+                raise TarError()
+            except TarError:
+                # file does not contain a tar
+                data.seek(0)
 
+        magic = get_magic_number(data)
+        if magic != MAGIC_NUMBER:
+            raise InvalidMagicError(magic, MAGIC_NUMBER)
+        # XXX:
+        #   I know this is strange, but somehow
+        #   there are five pickle serialised in a row.
+        #   I've checked the source code and tested
+        #   unpickling manually and five seems
+        #   to be the number.
+        for _ in range(5):
+            scan_result.merge(scan_pickle_bytes(data, file_id))
+        scan_result.scanned_files = 1
+        return scan_result
+
+
+def scan_bytes(data: bytes, file_id, file_ext: Optional[str] = None) -> ScanResult:
+    if file_ext is not None and file_ext in _pytorch_file_extensions:
+        return scan_pytorch(io.BytesIO(data), file_id)
+    else:
+        return scan_zip_bytes(io.BytesIO(data), file_id) if zipfile.is_zipfile(io.BytesIO(data)) else scan_pickle_bytes(io.BytesIO(data), file_id)
 
 def scan_huggingface_model(repo_id):
     # List model files
@@ -153,96 +235,43 @@ def scan_huggingface_model(repo_id):
     file_names = [file_name for file_name in (sibling.get("rfilename") for sibling in model["siblings"]) if file_name is not None]
 
     # Scan model files
-    files_scanned_count = 0
-    files_suspicious_count = 0
+    scan_result = ScanResult([])
     for file_name in file_names:
         file_ext = os.path.splitext(file_name)[1]
-        if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions:
+        if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions and file_ext not in _pytorch_file_extensions:
             continue
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
         url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
-        issues_count = scan_bytes(_http_get(url), url)
-        files_suspicious_count += 1 if issues_count > 0 else 0
-        files_scanned_count += 1
+        data = _http_get(url)
+        scan_result.merge(scan_bytes(data, url, file_ext))
 
-    return files_scanned_count, files_suspicious_count
+    return scan_result
 
 
-def scan_directory_path(path):
-    files_scanned_count = 0
-    files_suspicious_count = 0
+def scan_directory_path(path) -> ScanResult:
+    scan_result = ScanResult([])
 
     for base_path, _, file_names in os.walk(path):
         for file_name in file_names:
             file_ext = os.path.splitext(file_name)[1]
-            if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions:
+            if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions and file_ext not in _pytorch_file_extensions:
                 continue
             file_path = os.path.join(base_path, file_name)
             _log.debug("Scanning file %s", file_path)
             with open(file_path, "rb") as file:
                 data = file.read()
-            issues_count = scan_bytes(data, file_path)
-            files_suspicious_count += 1 if issues_count > 0 else 0
-            files_scanned_count += 1
+            scan_result.merge(scan_bytes(data, file_path, file_ext))
 
-    return files_scanned_count, files_suspicious_count
+    return scan_result
 
 
-def scan_file_path(path):
+def scan_file_path(path) -> ScanResult:
+    file_ext = os.path.splitext(path)[1]
     with open(path, "rb") as file:
         data = file.read()
-    issues_count = scan_bytes(data, path)
-    return 1, 1 if issues_count > 0 else 0
+    return scan_bytes(data, path, file_ext)
 
 
-def scan_url(url):
-    issues_count = scan_bytes(_http_get(url), url)
-    return 1, 1 if issues_count > 0 else 0
+def scan_url(url) -> ScanResult:
+    return scan_bytes(_http_get(url), url)
 
-
-def main():
-    _log.setLevel(logging.INFO)
-    _log.addHandler(logging.StreamHandler(stream=sys.stdout))
-
-    parser = argparse.ArgumentParser(description="Security scanner detecting Python Pickle files performing suspicious actions.")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("-p", "--path", help="Path to the file or folder to scan", dest='path')
-    group.add_argument("-u", "--url", help="URL to the file or folder to scan", dest='url')
-    group.add_argument("-hf", "--huggingface", help="Name of the Hugging Face model to scan", dest='huggingface_model')
-    parser.add_argument(
-        "-l", "--log", help="level of log messages to display (default: INFO)", dest='log_level',
-        choices=['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'])
-
-    args = parser.parse_args()
-
-    if "log_level" in args and args.log_level is not None:
-        _log.setLevel(getattr(logging, args.log_level))
-
-    try:
-        if args.path is not None:
-            path = os.path.abspath(args.path)
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"Path {path} does not exist")
-            if os.path.isdir(path):
-                files_scanned_count, files_suspicious_count = scan_directory_path(path)
-            else:
-                files_scanned_count, files_suspicious_count = scan_file_path(path)
-        elif args.url is not None:
-            files_scanned_count, files_suspicious_count = scan_url(args.url)
-        elif args.huggingface_model is not None:
-            files_scanned_count, files_suspicious_count = scan_huggingface_model(args.huggingface_model)
-        else:
-            raise ValueError("Command line must include either a path, a URL, or a Hugging Face model")
-
-        _log.info(f"""----------- SCAN SUMMARY -----------
-Scanned files: {files_scanned_count}
-Infected files: {files_suspicious_count}""")
-
-        return 0 if files_suspicious_count == 0 else 1
-    except Exception:
-        _log.exception("Unhandled exception")
-        return 2
-
-
-if __name__ == '__main__':
-    sys.exit(main())
