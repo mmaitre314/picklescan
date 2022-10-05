@@ -14,10 +14,12 @@ class InvalidMagicError(Exception):
 
 
 # copied from pytorch code
+# https://github.com/pytorch/pytorch/blob/664058fa83f1d8eede5d66418abff6e20bd76ca8/torch/serialization.py#L28
 MAGIC_NUMBER = 0x1950a86a20f9469cfc6c
 
 
 # copied from pytorch code
+# https://github.com/pytorch/pytorch/blob/664058fa83f1d8eede5d66418abff6e20bd76ca8/torch/serialization.py#L272
 def _is_compressed_file(f) -> bool:
     compress_modules = ['gzip']
     try:
@@ -27,6 +29,7 @@ def _is_compressed_file(f) -> bool:
 
 
 # copied from pytorch code
+# https://github.com/pytorch/pytorch/blob/664058fa83f1d8eede5d66418abff6e20bd76ca8/torch/serialization.py#L280
 def _should_read_directly(f):
     """
     Checks if f is a file that should be read directly. It should be read
@@ -44,6 +47,7 @@ def _should_read_directly(f):
 
 
 # copied from pytorch code
+# https://github.com/pytorch/pytorch/blob/664058fa83f1d8eede5d66418abff6e20bd76ca8/torch/serialization.py#L46
 def _is_zipfile(f) -> bool:
     # This is a stricter implementation than zipfile.is_zipfile().
     # zipfile.is_zipfile() is True if the magic number appears anywhere in the
