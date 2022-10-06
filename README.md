@@ -18,7 +18,7 @@ https://huggingface.co/ykilcher/totally-harmless-model/resolve/main/pytorch_mode
 ----------- SCAN SUMMARY -----------
 Scanned files: 1
 Infected files: 1
-Number of dangerous globals: 1
+Dangerous globals: 1
 ```
 
 The scanner can also load Pickles from local files, directories, URLs, and zip archives (a-la [PyTorch](https://pytorch.org/)):
