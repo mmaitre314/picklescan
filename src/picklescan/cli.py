@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 
-from .scanner import SafetyLevel, scan_directory_path
+from .scanner import scan_directory_path
 from .scanner import scan_file_path
 from .scanner import scan_url
 from .scanner import scan_huggingface_model
