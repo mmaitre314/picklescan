@@ -70,7 +70,7 @@ def main():
             f"""----------- SCAN SUMMARY -----------
 Scanned files: {scan_result.scanned_files}
 Infected files: {scan_result.infected_files}
-Number of {SafetyLevel.Dangerous.value} globals: {scan_result.issues_count}"""
+Dangerous globals: {scan_result.issues_count}"""
         )
         if args.globals and len(scan_result.globals) > 0:
             _log.info("All globals found:")

@@ -422,7 +422,7 @@ def test_scan_url():
     compare_scan_results(scan_url("https://localhost/mock/pickle/benign"), safe)
     compare_scan_results(scan_url("https://localhost/mock/zip/benign"), safe)
 
-    malicious = ScanResult([Global("posix", "system", SafetyLevel.Dangerous)], 1, 1, 1)
+    malicious = ScanResult([Global(os.name, "system", SafetyLevel.Dangerous)], 1, 1, 1)
     compare_scan_results(scan_url("https://localhost/mock/pickle/malicious"), malicious)
 
     malicious_zip = ScanResult(
