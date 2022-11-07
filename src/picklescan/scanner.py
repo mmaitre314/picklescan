@@ -183,8 +183,15 @@ def _list_globals(data: IO[bytes]) -> Set[Tuple[str, str]]:
                 for offset in range(1, n):
                     if ops[n - offset][0].name == "MEMOIZE":
                         continue
-                    if ops[n - offset][0].name not in ["SHORT_BINUNICODE", "UNICODE", "BINUNICODE", "BINUNICODE8"]:
-                        _log.debug(f"Presence of non-string opcode, categorizing as an unknown dangerous import")
+                    if ops[n - offset][0].name not in [
+                        "SHORT_BINUNICODE",
+                        "UNICODE",
+                        "BINUNICODE",
+                        "BINUNICODE8",
+                    ]:
+                        _log.debug(
+                            "Presence of non-string opcode, categorizing as an unknown dangerous import"
+                        )
                         values.append("unknown")
                     else:
                         values.append(ops[n - offset][1])
