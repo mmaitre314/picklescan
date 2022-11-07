@@ -409,10 +409,13 @@ def test_scan_directory_path():
             Global("collections", "OrderedDict", SafetyLevel.Innocuous),
             Global("torch._utils", "_rebuild_tensor_v2", SafetyLevel.Innocuous),
             Global("torch", "FloatStorage", SafetyLevel.Innocuous),
+            Global("unknown", "unknown", SafetyLevel.Dangerous),
+            Global("torch._utils", "_rebuild_tensor", SafetyLevel.Suspicious),
+            Global("torch", "_utils", SafetyLevel.Suspicious),
         ],
-        20,
-        18,
-        15,
+        21,
+        19,
+        16,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 
