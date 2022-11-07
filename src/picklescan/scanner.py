@@ -127,7 +127,7 @@ _unsafe_globals = {
 #
 
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
-_pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat"}
+_pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data", ".npy"}
 _zip_file_extensions = {".zip", ".npz"}
 
 
