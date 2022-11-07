@@ -7,7 +7,7 @@ import logging
 import os
 import pickletools
 from tarfile import TarError
-from typing import List, Optional, Set, Tuple
+from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 
@@ -130,7 +130,7 @@ _pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat"}
 _zip_file_extensions = {".zip", ".npz"}
 
 
-def _http_get(url):
+def _http_get(url) -> bytes:
     _log.debug(f"Request: GET {url}")
 
     parsed_url = urllib.parse.urlparse(url)
@@ -154,7 +154,7 @@ def _http_get(url):
         conn.close()
 
 
-def _list_globals(data: io.BytesIO) -> Set[Tuple[str, str]]:
+def _list_globals(data: IO[bytes]) -> Set[Tuple[str, str]]:
 
     globals = set()
 
@@ -198,7 +198,7 @@ def _list_globals(data: io.BytesIO) -> Set[Tuple[str, str]]:
     return globals
 
 
-def scan_pickle_bytes(data: io.BytesIO, file_id) -> ScanResult:
+def scan_pickle_bytes(data: IO[bytes], file_id) -> ScanResult:
     """Disassemble a Pickle stream and report issues"""
 
     globals = []
@@ -227,7 +227,7 @@ def scan_pickle_bytes(data: io.BytesIO, file_id) -> ScanResult:
     return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0)
 
 
-def scan_zip_bytes(data: io.BytesIO, file_id) -> ScanResult:
+def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
     result = ScanResult([])
 
     with zipfile.ZipFile(data, "r") as zip:
@@ -237,13 +237,12 @@ def scan_zip_bytes(data: io.BytesIO, file_id) -> ScanResult:
             if os.path.splitext(file_name)[1] in _pickle_file_extensions:
                 _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                 with zip.open(file_name, "r") as file:
-                    file_data = io.BytesIO(file.read())
-                    result.merge(scan_pickle_bytes(file_data, f"{file_id}:{file_name}"))
+                    result.merge(scan_pickle_bytes(file, f"{file_id}:{file_name}"))
 
     return result
 
 
-def scan_pytorch(data: io.BytesIO, file_id) -> ScanResult:
+def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
     # new pytorch format
     if _is_zipfile(data):
         return scan_zip_bytes(data, file_id)
@@ -275,14 +274,16 @@ def scan_pytorch(data: io.BytesIO, file_id) -> ScanResult:
         return scan_result
 
 
-def scan_bytes(data: bytes, file_id, file_ext: Optional[str] = None) -> ScanResult:
+def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> ScanResult:
     if file_ext is not None and file_ext in _pytorch_file_extensions:
-        return scan_pytorch(io.BytesIO(data), file_id)
+        return scan_pytorch(data, file_id)
     else:
+        is_zip = zipfile.is_zipfile(data)
+        data.seek(0)
         return (
-            scan_zip_bytes(io.BytesIO(data), file_id)
-            if zipfile.is_zipfile(io.BytesIO(data))
-            else scan_pickle_bytes(io.BytesIO(data), file_id)
+            scan_zip_bytes(data, file_id)
+            if is_zip
+            else scan_pickle_bytes(data, file_id)
         )
 
 
@@ -309,7 +310,7 @@ def scan_huggingface_model(repo_id):
             continue
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
         url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
-        data = _http_get(url)
+        data = io.BytesIO(_http_get(url))
         scan_result.merge(scan_bytes(data, url, file_ext))
 
     return scan_result
@@ -330,8 +331,7 @@ def scan_directory_path(path) -> ScanResult:
             file_path = os.path.join(base_path, file_name)
             _log.debug("Scanning file %s", file_path)
             with open(file_path, "rb") as file:
-                data = file.read()
-            scan_result.merge(scan_bytes(data, file_path, file_ext))
+                scan_result.merge(scan_bytes(file, file_path, file_ext))
 
     return scan_result
 
@@ -339,9 +339,8 @@ def scan_directory_path(path) -> ScanResult:
 def scan_file_path(path) -> ScanResult:
     file_ext = os.path.splitext(path)[1]
     with open(path, "rb") as file:
-        data = file.read()
-    return scan_bytes(data, path, file_ext)
+        return scan_bytes(file, path, file_ext)
 
 
 def scan_url(url) -> ScanResult:
-    return scan_bytes(_http_get(url), url)
+    return scan_bytes(io.BytesIO(_http_get(url)), url)
