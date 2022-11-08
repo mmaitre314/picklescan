@@ -1,6 +1,6 @@
 import io
 from pickletools import genops
-from typing import Optional
+from typing import IO, Optional
 
 
 class InvalidMagicError(Exception):
@@ -72,7 +72,7 @@ def _is_zipfile(f) -> bool:
     return read_bytes == local_header_magic_number
 
 
-def get_magic_number(data: io.BytesIO) -> Optional[int]:
+def get_magic_number(data: IO[bytes]) -> Optional[int]:
     for opcode, args, _pos in genops(data):
         if "INT" in opcode.name or "LONG" in opcode.name:
             return int(args)
