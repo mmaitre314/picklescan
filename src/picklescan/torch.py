@@ -47,7 +47,7 @@ def _should_read_directly(f):
 
 
 # copied from pytorch code
-# https://github.com/pytorch/pytorch/blob/664058fa83f1d8eede5d66418abff6e20bd76ca8/torch/serialization.py#L46
+# https://github.com/pytorch/pytorch/blob/0b3316ad2c6ff61416597ef29e8865876dcb12f5/torch/serialization.py#L66
 def _is_zipfile(f) -> bool:
     # This is a stricter implementation than zipfile.is_zipfile().
     # zipfile.is_zipfile() is True if the magic number appears anywhere in the
