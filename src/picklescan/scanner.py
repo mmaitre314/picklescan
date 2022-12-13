@@ -269,13 +269,7 @@ def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
 
         magic = get_magic_number(data)
         if magic != MAGIC_NUMBER:
-            raise InvalidMagicError(magic, MAGIC_NUMBER)
-        # XXX:
-        #   I know this is strange, but somehow
-        #   there are five pickle serialised in a row.
-        #   I've checked the source code and tested
-        #   unpickling manually and five seems
-        #   to be the number.
+            raise InvalidMagicError(magic, MAGIC_NUMBER, file_id)
         for _ in range(5):
             scan_result.merge(scan_pickle_bytes(data, file_id))
         scan_result.scanned_files = 1
