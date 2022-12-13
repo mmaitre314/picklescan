@@ -4,13 +4,14 @@ from typing import IO, Optional
 
 
 class InvalidMagicError(Exception):
-    def __init__(self, provided_magic: Optional[int], magic: int):
+    def __init__(self, provided_magic: Optional[int], magic: int, file: str):
         self.provided_magic = provided_magic
         self.magic = magic
+        self.file = file
         super().__init__()
 
     def __str__(self) -> str:
-        return f"{self.provided_magic} != {self.magic}"
+        return f"{self.file}: {self.provided_magic} != {self.magic}"
 
 
 # copied from pytorch code
@@ -75,5 +76,6 @@ def _is_zipfile(f) -> bool:
 def get_magic_number(data: IO[bytes]) -> Optional[int]:
     for opcode, args, _pos in genops(data):
         if "INT" in opcode.name or "LONG" in opcode.name:
+            data.seek(0)
             return int(args)
     return None

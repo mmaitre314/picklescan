@@ -3,12 +3,25 @@ import logging
 import os
 import sys
 
-from .scanner import scan_directory_path
+from .scanner import ScanResult, scan_directory_path
 from .scanner import scan_file_path
 from .scanner import scan_url
 from .scanner import scan_huggingface_model
 
 _log = logging.getLogger("picklescan")
+
+
+def print_summary(show_globals: bool, sr: ScanResult):
+    _log.info(
+        f"""----------- SCAN SUMMARY -----------
+Scanned files: {sr.scanned_files}
+Infected files: {sr.infected_files}
+Dangerous globals: {sr.issues_count}"""
+    )
+    if show_globals and len(sr.globals) > 0:
+        _log.info("All globals found:")
+        for g in sr.globals:
+            _log.info(f"  * {g.module}.{g.name} - {g.safety.value}")
 
 
 def main():
@@ -66,17 +79,10 @@ def main():
                 "Command line must include either a path, a URL, or a Hugging Face model"
             )
 
-        _log.info(
-            f"""----------- SCAN SUMMARY -----------
-Scanned files: {scan_result.scanned_files}
-Infected files: {scan_result.infected_files}
-Dangerous globals: {scan_result.issues_count}"""
-        )
-        if args.globals and len(scan_result.globals) > 0:
-            _log.info("All globals found:")
-            for g in scan_result.globals:
-                _log.info(f"  * {g.module}.{g.name} - {g.safety.value}")
+        print_summary(args.globals, scan_result)
 
+        if scan_result.scan_err:
+            return 2
         return 0 if scan_result.issues_count == 0 else 1
     except Exception:
         _log.exception("Unhandled exception")

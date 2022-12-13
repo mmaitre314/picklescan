@@ -39,12 +39,23 @@ class ScanResult:
     scanned_files: int = 0
     issues_count: int = 0
     infected_files: int = 0
+    scan_err: bool = False
 
     def merge(self, sr: "ScanResult"):
         self.globals.extend(sr.globals)
         self.scanned_files += sr.scanned_files
         self.issues_count += sr.issues_count
         self.infected_files += sr.infected_files
+        self.scan_err = self.scan_err or sr.scan_err
+
+
+class GenOpsError(Exception):
+    def __init__(self, msg: str):
+        self.msg = msg
+        super().__init__()
+
+    def __str__(self) -> str:
+        return self.msg
 
 
 _log = logging.getLogger("picklescan")
@@ -155,20 +166,20 @@ def _http_get(url) -> bytes:
         conn.close()
 
 
-def _list_globals(data: IO[bytes]) -> Set[Tuple[str, str]]:
+def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]]:
 
     globals = set()
 
     # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
-    pos = -1
-    while pos < data.tell():
-        pos = data.tell()
-
+    last_byte = b"dummy"
+    while last_byte != b"":
         # List opcodes
         try:
             ops = list(pickletools.genops(data))
-        except Exception:
-            break
+        except Exception as e:
+            raise GenOpsError(str(e))
+        last_byte = data.read(1)
+        data.seek(-1, 1)
 
         # Extract global imports
         for n in range(len(ops)):
@@ -202,15 +213,22 @@ def _list_globals(data: IO[bytes]) -> Set[Tuple[str, str]]:
                         f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2."
                     )
                 globals.add((values[1], values[0]))
+        if not multiple_pickles:
+            break
 
     return globals
 
 
-def scan_pickle_bytes(data: IO[bytes], file_id) -> ScanResult:
+def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanResult:
     """Disassemble a Pickle stream and report issues"""
 
     globals = []
-    raw_globals = _list_globals(data)
+    try:
+        raw_globals = _list_globals(data, multiple_pickles)
+    except GenOpsError as e:
+        _log.error(f"ERROR: parsing pickle in {file_id}: {e}")
+        return ScanResult(globals, scan_err=True)
+
     _log.debug("Global imports in %s: %s", file_id, raw_globals)
 
     issues_count = 0
@@ -232,7 +250,7 @@ def scan_pickle_bytes(data: IO[bytes], file_id) -> ScanResult:
             g.safety = SafetyLevel.Suspicious
         globals.append(g)
 
-    return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0)
+    return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, False)
 
 
 def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
@@ -269,22 +287,20 @@ def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
 
         magic = get_magic_number(data)
         if magic != MAGIC_NUMBER:
-            raise InvalidMagicError(magic, MAGIC_NUMBER)
-        # XXX:
-        #   I know this is strange, but somehow
-        #   there are five pickle serialised in a row.
-        #   I've checked the source code and tested
-        #   unpickling manually and five seems
-        #   to be the number.
+            raise InvalidMagicError(magic, MAGIC_NUMBER, file_id)
         for _ in range(5):
-            scan_result.merge(scan_pickle_bytes(data, file_id))
+            scan_result.merge(scan_pickle_bytes(data, file_id, multiple_pickles=False))
         scan_result.scanned_files = 1
         return scan_result
 
 
 def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> ScanResult:
     if file_ext is not None and file_ext in _pytorch_file_extensions:
-        return scan_pytorch(data, file_id)
+        try:
+            return scan_pytorch(data, file_id)
+        except InvalidMagicError as e:
+            _log.error(f"ERROR: Invalid magic number for file {e}")
+            return ScanResult([], scan_err=True)
     else:
         is_zip = zipfile.is_zipfile(data)
         data.seek(0)
