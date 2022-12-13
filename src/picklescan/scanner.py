@@ -162,13 +162,13 @@ def _list_globals(data: IO[bytes]) -> Set[Tuple[str, str]]:
     # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
     pos = -1
     while pos < data.tell():
-        pos = data.tell()
-
         # List opcodes
         try:
             ops = list(pickletools.genops(data))
         except Exception:
             break
+
+        pos = data.tell()
 
         # Extract global imports
         for n in range(len(ops)):
