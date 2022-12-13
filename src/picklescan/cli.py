@@ -81,6 +81,8 @@ def main():
 
         print_summary(args.globals, scan_result)
 
+        if scan_result.scan_err:
+            return 2
         return 0 if scan_result.issues_count == 0 else 1
     except Exception:
         _log.exception("Unhandled exception")
