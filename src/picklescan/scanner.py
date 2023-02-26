@@ -11,7 +11,12 @@ from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 
-from numpy.lib.format import MAGIC_PREFIX as NUMPY_MAGIC_PREFIX, _check_version, _read_array_header, read_magic
+from numpy.lib.format import (
+    MAGIC_PREFIX as NUMPY_MAGIC_PREFIX,
+    _check_version,
+    _read_array_header,
+    read_magic,
+)
 
 from .torch import (
     get_magic_number,
@@ -285,8 +290,8 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
 
 def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
     # Code to distinguish from NumPy binary files and pickles.
-    _ZIP_PREFIX = b'PK\x03\x04'
-    _ZIP_SUFFIX = b'PK\x05\x06' # empty zip files start with this
+    _ZIP_PREFIX = b"PK\x03\x04"
+    _ZIP_SUFFIX = b"PK\x05\x06"  # empty zip files start with this
     N = len(NUMPY_MAGIC_PREFIX)
     magic = data.read(N)
     # If the file size is less than N, we need to make sure not
@@ -301,8 +306,7 @@ def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
 
         version = read_magic(data)
         _check_version(version)
-        _, _, dtype = _read_array_header(
-                data, version, max_header_size=max_header_size)
+        _, _, dtype = _read_array_header(data, version, max_header_size=max_header_size)
 
         if dtype.hasobject:
             return scan_pickle_bytes(data, file_id)
