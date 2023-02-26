@@ -11,6 +11,8 @@ from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 
+from numpy.lib.format import MAGIC_PREFIX as NUMPY_MAGIC_PREFIX, _check_version, _read_array_header, read_magic
+
 from .torch import (
     get_magic_number,
     InvalidMagicError,
@@ -136,8 +138,10 @@ _unsafe_globals = {
 # https://www.tensorflow.org/api_docs/python/tf/keras/models/load_model
 #
 
+# TODO: support .npz files
+_numpy_file_extensions = {".npy"}
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
-_pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data", ".npy"}
+_pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data"}
 _zip_file_extensions = {".zip", ".npz"}
 
 
@@ -279,6 +283,35 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
     return result
 
 
+def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
+    # Code to distinguish from NumPy binary files and pickles.
+    _ZIP_PREFIX = b'PK\x03\x04'
+    _ZIP_SUFFIX = b'PK\x05\x06' # empty zip files start with this
+    N = len(NUMPY_MAGIC_PREFIX)
+    magic = data.read(N)
+    # If the file size is less than N, we need to make sure not
+    # to seek past the beginning of the file
+    data.seek(-min(N, len(magic)), 1)  # back-up
+    max_header_size = 2**64
+    if magic.startswith(_ZIP_PREFIX) or magic.startswith(_ZIP_SUFFIX):
+        # .npz file
+        raise NotImplementedError("Scanning of .npz files is not implemented yet")
+    elif magic == NUMPY_MAGIC_PREFIX:
+        # .npy file
+
+        version = read_magic(data)
+        _check_version(version)
+        _, _, dtype = _read_array_header(
+                data, version, max_header_size=max_header_size)
+
+        if dtype.hasobject:
+            return scan_pickle_bytes(data, file_id)
+        else:
+            return ScanResult([], 1)
+    else:
+        return scan_pickle_bytes(data, file_id)
+
+
 def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
     # new pytorch format
     if _is_zipfile(data):
@@ -312,6 +345,8 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> Scan
         except InvalidMagicError as e:
             _log.error(f"ERROR: Invalid magic number for file {e}")
             return ScanResult([], scan_err=True)
+    elif file_ext is not None and file_ext in _numpy_file_extensions:
+        return scan_numpy(data, file_id)
     else:
         is_zip = zipfile.is_zipfile(data)
         data.seek(0)
