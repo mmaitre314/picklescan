@@ -25,6 +25,7 @@ from picklescan.scanner import (
     scan_file_path,
     scan_url,
     scan_huggingface_model,
+    scan_numpy,
     scan_pytorch,
 )
 
@@ -243,6 +244,23 @@ def test_scan_zip_bytes():
     assert scan_zip_bytes(io.BytesIO(buffer.getbuffer()), "test.zip") == ScanResult(
         [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
     )
+
+
+def test_scan_numpy():
+    scan_result = ScanResult(
+        [
+            Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Suspicious),
+            Global("numpy", "ndarray", SafetyLevel.Suspicious),
+            Global("numpy", "dtype", SafetyLevel.Suspicious),
+        ],
+        1,
+        0,
+        0,
+    )
+    with open(f"{_root_path}/data/object_array.npy", "rb") as f:
+        compare_scan_results(
+            scan_numpy(io.BytesIO(f.read()), "object_array.npy"), scan_result
+        )
 
 
 def test_scan_pytorch():
