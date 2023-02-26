@@ -409,7 +409,7 @@ def test_scan_directory_path():
             Global("collections", "OrderedDict", SafetyLevel.Innocuous),
             Global("torch._utils", "_rebuild_tensor_v2", SafetyLevel.Innocuous),
             Global("torch", "FloatStorage", SafetyLevel.Innocuous),
-            Global("unknown", "unknown", SafetyLevel.Dangerous),
+            Global("_rebuild_tensor", "unknown", SafetyLevel.Dangerous),
             Global("torch._utils", "_rebuild_tensor", SafetyLevel.Suspicious),
             Global("torch", "_utils", SafetyLevel.Suspicious),
         ],

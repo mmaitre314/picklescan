@@ -113,7 +113,6 @@ _unsafe_globals = {
     "socket": "*",
     "subprocess": "*",
     "sys": "*",
-    "unknown": "*",
 }
 
 #
@@ -170,6 +169,7 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
 
     globals = set()
 
+    memo = {}
     # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
     last_byte = b"dummy"
     while last_byte != b"":
@@ -187,6 +187,9 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
             op_name = op[0].name
             op_value = op[1]
 
+            if op_name == "MEMOIZE" and n > 0:
+                memo[len(memo)] = ops[n - 1][1]
+
             if op_name == "GLOBAL":
                 globals.add(tuple(op_value.split(" ", 1)))
             elif op_name == "STACK_GLOBAL":
@@ -194,7 +197,9 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                 for offset in range(1, n):
                     if ops[n - offset][0].name == "MEMOIZE":
                         continue
-                    if ops[n - offset][0].name not in [
+                    if ops[n - offset][0].name in ["GET", "BINGET", "LONG_BINGET"]:
+                        values.append(memo[int(ops[n - offset][1])])
+                    elif ops[n - offset][0].name not in [
                         "SHORT_BINUNICODE",
                         "UNICODE",
                         "BINUNICODE",
@@ -236,7 +241,13 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanRe
         g = Global(rg[0], rg[1], SafetyLevel.Dangerous)
         safe_filter = _safe_globals.get(g.module)
         unsafe_filter = _unsafe_globals.get(g.module)
-        if unsafe_filter is not None and (
+        if "unknown" in g.module or "unknown" in g.name:
+            g.safety = SafetyLevel.Dangerous
+            _log.warning(
+                "%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name
+            )
+            issues_count += 1
+        elif unsafe_filter is not None and (
             unsafe_filter == "*" or g.name in unsafe_filter
         ):
             g.safety = SafetyLevel.Dangerous
