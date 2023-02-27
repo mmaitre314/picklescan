@@ -162,6 +162,17 @@ def initialize_zip_file(path, file_name, data):
             zip.writestr(file_name, data)
 
 
+def initialize_numpy_file(path):
+    import numpy as np
+
+    # create numpy object array
+    with open(path, "wb") as f:
+        data = [(1, 2), (3, 4)]
+        x = np.empty((2, 2), dtype=object)
+        x[:] = data
+        np.save(f, x)
+
+
 def initialize_pickle_files():
     os.makedirs(f"{_root_path}/data", exist_ok=True)
 
@@ -203,6 +214,8 @@ def initialize_pickle_files():
         "data.pkl",
         pickle.dumps(Malicious1(), protocol=4),
     )
+
+    initialize_numpy_file(f"{_root_path}/data/object_array.npy")
 
 
 initialize_pickle_files()

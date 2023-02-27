@@ -297,7 +297,6 @@ def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
     # If the file size is less than N, we need to make sure not
     # to seek past the beginning of the file
     data.seek(-min(N, len(magic)), 1)  # back-up
-    max_header_size = 2**64
     if magic.startswith(_ZIP_PREFIX) or magic.startswith(_ZIP_SUFFIX):
         # .npz file
         raise NotImplementedError("Scanning of .npz files is not implemented yet")
@@ -306,7 +305,7 @@ def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
 
         version = read_magic(data)
         _check_version(version)
-        _, _, dtype = _read_array_header(data, version, max_header_size=max_header_size)
+        _, _, dtype = _read_array_header(data, version)
 
         if dtype.hasobject:
             return scan_pickle_bytes(data, file_id)
