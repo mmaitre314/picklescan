@@ -11,13 +11,6 @@ from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 
-from numpy.lib.format import (
-    MAGIC_PREFIX as NUMPY_MAGIC_PREFIX,
-    _check_version,
-    _read_array_header,
-    read_magic,
-)
-
 from .torch import (
     get_magic_number,
     InvalidMagicError,
@@ -289,10 +282,14 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
 
 
 def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
+
+    # Delay import to avoid dependency on NumPy
+    import numpy as np
+
     # Code to distinguish from NumPy binary files and pickles.
     _ZIP_PREFIX = b"PK\x03\x04"
     _ZIP_SUFFIX = b"PK\x05\x06"  # empty zip files start with this
-    N = len(NUMPY_MAGIC_PREFIX)
+    N = len(np.lib.format.MAGIC_PREFIX)
     magic = data.read(N)
     # If the file size is less than N, we need to make sure not
     # to seek past the beginning of the file
@@ -300,12 +297,12 @@ def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
     if magic.startswith(_ZIP_PREFIX) or magic.startswith(_ZIP_SUFFIX):
         # .npz file
         raise NotImplementedError("Scanning of .npz files is not implemented yet")
-    elif magic == NUMPY_MAGIC_PREFIX:
+    elif magic == np.lib.format.MAGIC_PREFIX:
         # .npy file
 
-        version = read_magic(data)
-        _check_version(version)
-        _, _, dtype = _read_array_header(data, version)
+        version = np.lib.format.read_magic(data)
+        np.lib.format._check_version(version)
+        _, _, dtype = np.lib.format._read_array_header(data, version)
 
         if dtype.hasobject:
             return scan_pickle_bytes(data, file_id)
