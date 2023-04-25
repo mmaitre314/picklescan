@@ -28,6 +28,8 @@ picklescan --path downloads
 picklescan --url https://huggingface.co/sshleifer/tiny-distilbert-base-cased-distilled-squad/resolve/main/pytorch_model.bin
 ```
 
+To scan Numpy's `.npy` files, pip install the `numpy` package first.
+
 The scanner exit status codes are (a-la [ClamAV](https://www.clamav.net/)):
 - `0`: scan did not find malware
 - `1`: scan found malware
