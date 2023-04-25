@@ -25,6 +25,7 @@ from picklescan.scanner import (
     scan_file_path,
     scan_url,
     scan_huggingface_model,
+    scan_numpy,
     scan_pytorch,
 )
 
@@ -161,6 +162,17 @@ def initialize_zip_file(path, file_name, data):
             zip.writestr(file_name, data)
 
 
+def initialize_numpy_file(path):
+    import numpy as np
+
+    # create numpy object array
+    with open(path, "wb") as f:
+        data = [(1, 2), (3, 4)]
+        x = np.empty((2, 2), dtype=object)
+        x[:] = data
+        np.save(f, x)
+
+
 def initialize_pickle_files():
     os.makedirs(f"{_root_path}/data", exist_ok=True)
 
@@ -203,6 +215,8 @@ def initialize_pickle_files():
         pickle.dumps(Malicious1(), protocol=4),
     )
 
+    initialize_numpy_file(f"{_root_path}/data/object_array.npy")
+
 
 initialize_pickle_files()
 
@@ -243,6 +257,23 @@ def test_scan_zip_bytes():
     assert scan_zip_bytes(io.BytesIO(buffer.getbuffer()), "test.zip") == ScanResult(
         [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
     )
+
+
+def test_scan_numpy():
+    scan_result = ScanResult(
+        [
+            Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Suspicious),
+            Global("numpy", "ndarray", SafetyLevel.Suspicious),
+            Global("numpy", "dtype", SafetyLevel.Suspicious),
+        ],
+        1,
+        0,
+        0,
+    )
+    with open(f"{_root_path}/data/object_array.npy", "rb") as f:
+        compare_scan_results(
+            scan_numpy(io.BytesIO(f.read()), "object_array.npy"), scan_result
+        )
 
 
 def test_scan_pytorch():
