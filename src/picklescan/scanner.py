@@ -197,7 +197,12 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
             elif op_name == "STACK_GLOBAL":
                 values = []
                 for offset in range(1, n):
-                    if ops[n - offset][0].name in ["MEMOIZE", "PUT", "BINPUT", "LONG_BINPUT"]:
+                    if ops[n - offset][0].name in [
+                        "MEMOIZE",
+                        "PUT",
+                        "BINPUT",
+                        "LONG_BINPUT",
+                    ]:
                         continue
                     if ops[n - offset][0].name in ["GET", "BINGET", "LONG_BINGET"]:
                         values.append(memo[int(ops[n - offset][1])])
