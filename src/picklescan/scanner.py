@@ -189,7 +189,7 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
             op_name = op[0].name
             op_value = op[1]
 
-            if op_name == "MEMOIZE" and n > 0:
+            if op_name in ["MEMOIZE", "PUT", "BINPUT", "LONG_BINPUT"] and n > 0:
                 memo[len(memo)] = ops[n - 1][1]
 
             if op_name == "GLOBAL":
@@ -197,7 +197,7 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
             elif op_name == "STACK_GLOBAL":
                 values = []
                 for offset in range(1, n):
-                    if ops[n - offset][0].name == "MEMOIZE":
+                    if ops[n - offset][0].name in ["MEMOIZE", "PUT", "BINPUT", "LONG_BINPUT"]:
                         continue
                     if ops[n - offset][0].name in ["GET", "BINGET", "LONG_BINGET"]:
                         values.append(memo[int(ops[n - offset][1])])
@@ -220,6 +220,7 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                         f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2."
                     )
                 globals.add((values[1], values[0]))
+
         if not multiple_pickles:
             break
 
