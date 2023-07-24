@@ -74,8 +74,11 @@ def _is_zipfile(f) -> bool:
 
 
 def get_magic_number(data: IO[bytes]) -> Optional[int]:
-    for opcode, args, _pos in genops(data):
-        if "INT" in opcode.name or "LONG" in opcode.name:
-            data.seek(0)
-            return int(args)
+    try:
+        for opcode, args, _pos in genops(data):
+            if "INT" in opcode.name or "LONG" in opcode.name:
+                data.seek(0)
+                return int(args)
+    except ValueError:
+        return None
     return None

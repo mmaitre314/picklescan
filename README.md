@@ -70,6 +70,12 @@ picklescan -l DEBUG -p downloads/pytorch_model.bin
 picklescan -l DEBUG -u https://huggingface.co/prajjwal1/bert-tiny/resolve/main/pytorch_model.bin
 ```
 
+Lint the code:
+```
+black src tests
+flake8 src tests --count --show-source
+```
+
 Publish the package to [PyPI](https://pypi.org/project/picklescan/): bump the package version in `setup.cfg` and create a GitHub release. This triggers the `publish` workflow.
 
 Alternative manual steps to publish the package:

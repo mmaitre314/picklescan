@@ -217,6 +217,9 @@ def initialize_pickle_files():
 
     initialize_numpy_file(f"{_root_path}/data/object_array.npy")
 
+    # Fake PyTorch file (PNG file format) simulating https://huggingface.co/RectalWorm/loras_new/blob/main/Owl_Mage_no_background.pt
+    initialize_data_file(f"{_root_path}/data/bad_pytorch.pt", b"\211PNG\r\n\032\n")
+
 
 initialize_pickle_files()
 
@@ -408,6 +411,11 @@ def test_scan_file_path():
     malicious9 = ScanResult([Global("sys", "exit", SafetyLevel.Dangerous)], 1, 1, 1)
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious9.pkl"), malicious9
+    )
+
+    bad_pytorch = ScanResult([], 0, 0, 0, True)
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/bad_pytorch.pt"), bad_pytorch
     )
 
 
