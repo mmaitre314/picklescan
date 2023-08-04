@@ -5,6 +5,9 @@
 
 Security scanner detecting Python Pickle files performing suspicious actions.
 
+> For more generic model scanning, Protect AI's [modelscan](https://github.com/protectai/modelscan) is now available to scan not only Pickle files but
+> also PyTorch, TensorFlow, and Keras.
+
 ## Getting started
 
 Scan a malicious model on [Hugging Face](https://huggingface.co/):
