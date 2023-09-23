@@ -203,7 +203,10 @@ def initialize_pickle_files():
     #     1: S        STRING     'raise RuntimeError("Injection running")'
     #    44: i        INST       '__builtin__ exec' (MARK at 0)
     #    62: .    STOP
-    initialize_data_file(f"{_root_path}/data/malicious10.pkl", b'(S\'raise RuntimeError("Injection running")\'\ni__builtin__\nexec\n.')
+    initialize_data_file(
+        f"{_root_path}/data/malicious10.pkl",
+        b"(S'raise RuntimeError(\"Injection running\")'\ni__builtin__\nexec\n.",
+    )
 
     initialize_data_file(f"{_root_path}/data/malicious3.pkl", malicious3_pickle_bytes)
     initialize_pickle_file(f"{_root_path}/data/malicious4.pickle", Malicious4(), 4)
