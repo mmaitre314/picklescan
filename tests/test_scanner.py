@@ -198,6 +198,13 @@ def initialize_pickle_files():
         + b"dict\nS'get'\ntRp103\n0c__builtin__\napply\n(g103\n(g100\nS'picklesmashed'\nltRp104\n0g104\n.",
     )
 
+    # Malicious Pickle with an INST opcode
+    #     0: (    MARK
+    #     1: S        STRING     'raise RuntimeError("Injection running")'
+    #    44: i        INST       '__builtin__ exec' (MARK at 0)
+    #    62: .    STOP
+    initialize_data_file(f"{_root_path}/data/malicious10.pkl", b'(S\'raise RuntimeError("Injection running")\'\ni__builtin__\nexec\n.')
+
     initialize_data_file(f"{_root_path}/data/malicious3.pkl", malicious3_pickle_bytes)
     initialize_pickle_file(f"{_root_path}/data/malicious4.pickle", Malicious4(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious5.pickle", Malicious5(), 4)
@@ -413,6 +420,13 @@ def test_scan_file_path():
         scan_file_path(f"{_root_path}/data/malicious9.pkl"), malicious9
     )
 
+    malicious10 = ScanResult(
+        [Global("__builtin__", "exec", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious10.pkl"), malicious10
+    )
+
     bad_pytorch = ScanResult([], 0, 0, 0, True)
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/bad_pytorch.pt"), bad_pytorch
@@ -451,10 +465,11 @@ def test_scan_directory_path():
             Global("_rebuild_tensor", "unknown", SafetyLevel.Dangerous),
             Global("torch._utils", "_rebuild_tensor", SafetyLevel.Suspicious),
             Global("torch", "_utils", SafetyLevel.Suspicious),
+            Global("__builtin__", "exec", SafetyLevel.Dangerous),
         ],
-        21,
-        19,
-        16,
+        22,
+        20,
+        17,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 

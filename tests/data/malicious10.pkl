@@ -1,0 +1,4 @@
+(S'raise RuntimeError("Injection running")'
+i__builtin__
+exec
+.
