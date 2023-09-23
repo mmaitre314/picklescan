@@ -192,7 +192,7 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
             if op_name in ["MEMOIZE", "PUT", "BINPUT", "LONG_BINPUT"] and n > 0:
                 memo[len(memo)] = ops[n - 1][1]
 
-            if op_name == "GLOBAL":
+            if op_name in ("GLOBAL", "INST"):
                 globals.add(tuple(op_value.split(" ", 1)))
             elif op_name == "STACK_GLOBAL":
                 values = []
