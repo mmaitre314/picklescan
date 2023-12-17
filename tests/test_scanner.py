@@ -208,6 +208,36 @@ def initialize_pickle_files():
         b"(S'raise RuntimeError(\"Injection running\")'\ni__builtin__\nexec\n.",
     )
 
+    # Malicious Pickle from Capture-the-Flag challenge 'Misc/Safe Pickle' at https://imaginaryctf.org/Challenges
+    # GitHub Issue: https://github.com/mmaitre314/picklescan/issues/22
+    initialize_data_file(
+        f"{_root_path}/data/malicious11.pkl",
+        b"".join(
+            [
+                pickle.UNICODE + b"os\n",
+                pickle.PUT + b"2\n",
+                pickle.POP,
+                pickle.UNICODE + b"system\n",
+                pickle.PUT + b"3\n",
+                pickle.POP,
+                pickle.UNICODE + b"torch\n",
+                pickle.PUT + b"0\n",
+                pickle.POP,
+                pickle.UNICODE + b"LongStorage\n",
+                pickle.PUT + b"1\n",
+                pickle.POP,
+                pickle.GET + b"2\n",
+                pickle.GET + b"3\n",
+                pickle.STACK_GLOBAL,
+                pickle.MARK,
+                pickle.UNICODE + b"cat flag.txt\n",
+                pickle.TUPLE,
+                pickle.REDUCE,
+                pickle.STOP,
+            ]
+        ),
+    )
+
     initialize_data_file(f"{_root_path}/data/malicious3.pkl", malicious3_pickle_bytes)
     initialize_pickle_file(f"{_root_path}/data/malicious4.pickle", Malicious4(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious5.pickle", Malicious5(), 4)
@@ -469,10 +499,11 @@ def test_scan_directory_path():
             Global("torch._utils", "_rebuild_tensor", SafetyLevel.Suspicious),
             Global("torch", "_utils", SafetyLevel.Suspicious),
             Global("__builtin__", "exec", SafetyLevel.Dangerous),
+            Global("os", "system", SafetyLevel.Dangerous),
         ],
-        22,
-        20,
-        17,
+        23,
+        21,
+        18,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 
