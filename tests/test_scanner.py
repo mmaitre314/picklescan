@@ -238,6 +238,54 @@ def initialize_pickle_files():
         ),
     )
 
+    # Code which created malicious12.pkl using pickleassem (see https://github.com/gousaiyang/pickleassem)
+    #
+    # p = PickleAssembler(proto=4)
+    #
+    # # get operator.attrgetter onto stack
+    # p.push_short_binunicode("operator")
+    # p.memo_memoize()
+    # p.push_short_binunicode("attrgetter")
+    # p.memo_memoize()
+    # p.build_stack_global()
+    # p.memo_memoize()
+    #
+    # # get operator.attrgetter("system") onto stack
+    # p.push_short_binunicode("system")
+    # p.memo_memoize()
+    # p.build_tuple1()
+    # p.memo_memoize()
+    # p.build_reduce()
+    # p.memo_memoize()
+    #
+    # # get os module onto stack
+    # p.push_short_binunicode("builtins")
+    # p.memo_memoize()
+    # p.push_short_binunicode("__import__")
+    # p.memo_memoize()
+    # p.build_stack_global()
+    # p.memo_memoize()
+    # p.push_short_binunicode("os")
+    # p.memo_memoize()
+    # p.build_tuple1()
+    # p.memo_memoize()
+    # p.build_reduce()
+    # p.memo_memoize()
+    #
+    # # get os.system onto stack
+    # p.build_tuple1()
+    # p.memo_memoize()
+    # p.build_reduce()
+    # p.memo_memoize()
+    #
+    # # call os.system("echo pwned")
+    # p.push_short_binunicode("echo pwned")
+    # p.memo_memoize()
+    # p.build_tuple1()
+    # p.memo_memoize()
+    # p.build_reduce()
+    # p.memo_memoize()
+
     initialize_data_file(f"{_root_path}/data/malicious3.pkl", malicious3_pickle_bytes)
     initialize_pickle_file(f"{_root_path}/data/malicious4.pickle", Malicious4(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious5.pickle", Malicious5(), 4)
@@ -500,10 +548,12 @@ def test_scan_directory_path():
             Global("torch", "_utils", SafetyLevel.Suspicious),
             Global("__builtin__", "exec", SafetyLevel.Dangerous),
             Global("os", "system", SafetyLevel.Dangerous),
+            Global("operator", "attrgetter", SafetyLevel.Dangerous),
+            Global("builtins", "__import__", SafetyLevel.Suspicious),
         ],
-        23,
-        21,
-        18,
+        24,
+        22,
+        19,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 

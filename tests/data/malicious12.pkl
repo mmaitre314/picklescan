@@ -1,0 +1,4 @@
+€Œoperator”Œ
+attrgetter”“”Œsystem”…”R”Œbuiltins”Œ
+__import__”“”Œos”…”R”…”R”Œ
+echo pwned”…”R”.
