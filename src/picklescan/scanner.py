@@ -114,15 +114,12 @@ _unsafe_globals = {
     "subprocess": "*",
     "sys": "*",
     "operator": "attrgetter",  # Ex of code execution: operator.attrgetter("system")(__import__("os"))("echo pwned")
+    "pickle": "*",
 }
 
 #
 # TODO: handle methods loading other Pickle files (either mark as suspicious, or follow calls to scan other files [preventing infinite loops])
 #
-# pickle.loads()
-# https://docs.python.org/3/library/pickle.html#pickle.loads
-# pickle.load()
-# https://docs.python.org/3/library/pickle.html#pickle.load
 # numpy.load()
 # https://numpy.org/doc/stable/reference/generated/numpy.load.html#numpy.load
 # numpy.ctypeslib.load_library()
