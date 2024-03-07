@@ -303,7 +303,7 @@ def initialize_pickle_files():
     initialize_pickle_file(f"{_root_path}/data/malicious9.pkl", Malicious8(), 4)
     initialize_pickle_file(
         f"{_root_path}/data/malicious13a.pkl", Malicious13(), 0
-    )  # pickle module serialized as cPickle
+    )  # pickle module serialized as cpickle
     initialize_pickle_file(
         f"{_root_path}/data/malicious13b.pkl", Malicious13(), 4
     )  # pickle module serialized as _pickle
