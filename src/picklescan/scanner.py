@@ -115,6 +115,7 @@ _unsafe_globals = {
     "sys": "*",
     "operator": "attrgetter",  # Ex of code execution: operator.attrgetter("system")(__import__("os"))("echo pwned")
     "pickle": "*",
+    "_pickle": "*",
 }
 
 #

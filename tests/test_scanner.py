@@ -301,7 +301,12 @@ def initialize_pickle_files():
     initialize_pickle_file(f"{_root_path}/data/malicious7.pkl", Malicious6(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious8.pkl", Malicious7(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious9.pkl", Malicious8(), 4)
-    initialize_pickle_file(f"{_root_path}/data/malicious13.pkl", Malicious13(), 0)
+    initialize_pickle_file(
+        f"{_root_path}/data/malicious13a.pkl", Malicious13(), 0
+    )  # pickle module serialized as cPickle
+    initialize_pickle_file(
+        f"{_root_path}/data/malicious13b.pkl", Malicious13(), 4
+    )  # pickle module serialized as _pickle
 
     initialize_zip_file(
         f"{_root_path}/data/malicious1.zip",
@@ -557,11 +562,12 @@ def test_scan_directory_path():
             Global("operator", "attrgetter", SafetyLevel.Dangerous),
             Global("builtins", "__import__", SafetyLevel.Suspicious),
             Global("pickle", "loads", SafetyLevel.Dangerous),
+            Global("_pickle", "loads", SafetyLevel.Dangerous),
             Global("_codecs", "encode", SafetyLevel.Suspicious),
         ],
-        scanned_files=25,
-        issues_count=23,
-        infected_files=20,
+        scanned_files=26,
+        issues_count=24,
+        infected_files=21,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 
@@ -600,5 +606,7 @@ def test_main():
 
 
 def test_pickle_files():
-    with open(f"{_root_path}/data/malicious13.pkl", "rb") as file:
+    with open(f"{_root_path}/data/malicious13a.pkl", "rb") as file:
+        assert pickle.load(file) == 12345
+    with open(f"{_root_path}/data/malicious13b.pkl", "rb") as file:
         assert pickle.load(file) == 12345
