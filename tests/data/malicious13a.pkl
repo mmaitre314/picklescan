@@ -1,0 +1,15 @@
+cpickle
+loads
+p0
+(c_codecs
+encode
+p1
+(VI12345\u000a.
+p2
+Vlatin1
+p3
+tp4
+Rp5
+tp6
+Rp7
+.

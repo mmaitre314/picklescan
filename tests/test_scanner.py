@@ -78,6 +78,11 @@ class Malicious8:
         return sys.exit, (0,)
 
 
+class Malicious13:
+    def __reduce__(self):
+        return pickle.loads, (b"I12345\n.",)  # Loads the value 12345
+
+
 class HTTPResponse:
     def __init__(self, status, data=None):
         self.status = status
@@ -296,6 +301,12 @@ def initialize_pickle_files():
     initialize_pickle_file(f"{_root_path}/data/malicious7.pkl", Malicious6(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious8.pkl", Malicious7(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious9.pkl", Malicious8(), 4)
+    initialize_pickle_file(
+        f"{_root_path}/data/malicious13a.pkl", Malicious13(), 0
+    )  # pickle module serialized as cpickle
+    initialize_pickle_file(
+        f"{_root_path}/data/malicious13b.pkl", Malicious13(), 4
+    )  # pickle module serialized as _pickle
 
     initialize_zip_file(
         f"{_root_path}/data/malicious1.zip",
@@ -516,7 +527,7 @@ def test_scan_file_path():
 
 def test_scan_directory_path():
     sr = ScanResult(
-        [
+        globals=[
             Global("builtins", "eval", SafetyLevel.Dangerous),
             Global("httplib", "HTTPSConnection", SafetyLevel.Dangerous),
             Global("collections", "OrderedDict", SafetyLevel.Innocuous),
@@ -550,10 +561,13 @@ def test_scan_directory_path():
             Global("os", "system", SafetyLevel.Dangerous),
             Global("operator", "attrgetter", SafetyLevel.Dangerous),
             Global("builtins", "__import__", SafetyLevel.Suspicious),
+            Global("pickle", "loads", SafetyLevel.Dangerous),
+            Global("_pickle", "loads", SafetyLevel.Dangerous),
+            Global("_codecs", "encode", SafetyLevel.Suspicious),
         ],
-        24,
-        22,
-        19,
+        scanned_files=26,
+        issues_count=24,
+        infected_files=21,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 
@@ -589,3 +603,10 @@ def test_main():
         importlib.import_module("picklescan.__main__")
     finally:
         sys.argv = argv
+
+
+def test_pickle_files():
+    with open(f"{_root_path}/data/malicious13a.pkl", "rb") as file:
+        assert pickle.load(file) == 12345
+    with open(f"{_root_path}/data/malicious13b.pkl", "rb") as file:
+        assert pickle.load(file) == 12345
