@@ -167,7 +167,6 @@ def _http_get(url) -> bytes:
 
 
 def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]]:
-
     globals = set()
 
     memo = {}
@@ -178,7 +177,17 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
         try:
             ops = list(pickletools.genops(data))
         except Exception as e:
-            raise GenOpsError(str(e))
+            # XXX: pickle will happily load files that contain arbitrarily placed new lines whereas pickletools errors in such cases.
+            # below is code to circumvent or skip these newlines while succeeding at parsing the opcodes.
+            err = str(e)
+            if "opcode b'\\n' unknown" not in err:
+                raise GenOpsError(err)
+            else:
+                pos = int(err.split(",")[0].replace("at position ", ""))
+                data.seek(-(pos + 1), 1)
+                ops = list(pickletools.genops(data.read(pos)))
+                data.seek(1, 1)
+
         last_byte = data.read(1)
         data.seek(-1, 1)
 
@@ -288,7 +297,6 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
 
 
 def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
-
     # Delay import to avoid dependency on NumPy
     import numpy as np
 
