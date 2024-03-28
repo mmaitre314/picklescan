@@ -243,6 +243,35 @@ def initialize_pickle_files():
         ),
     )
 
+    initialize_data_file(
+        f"{_root_path}/data/malicious-invalid-bytes.pkl",
+        b"".join(
+            [
+                pickle.UNICODE + b"os\n",
+                pickle.PUT + b"2\n",
+                pickle.POP,
+                pickle.UNICODE + b"system\n",
+                pickle.PUT + b"3\n",
+                pickle.POP,
+                pickle.UNICODE + b"torch\n",
+                pickle.PUT + b"0\n",
+                pickle.POP,
+                pickle.UNICODE + b"LongStorage\n",
+                pickle.PUT + b"1\n",
+                pickle.POP,
+                pickle.GET + b"2\n",
+                pickle.GET + b"3\n",
+                pickle.STACK_GLOBAL,
+                pickle.MARK,
+                pickle.UNICODE + b"cat flag.txt\n",
+                pickle.TUPLE,
+                pickle.REDUCE,
+                pickle.STOP,
+                b"\n\n\t\t",
+            ]
+        ),
+    )
+
     # Code which created malicious12.pkl using pickleassem (see https://github.com/gousaiyang/pickleassem)
     #
     # p = PickleAssembler(proto=4)
@@ -351,7 +380,6 @@ def test_scan_pickle_bytes():
 
 
 def test_scan_zip_bytes():
-
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zip:
         zip.writestr("data.pkl", pickle.dumps(Malicious1()))
@@ -559,15 +587,17 @@ def test_scan_directory_path():
             Global("torch", "_utils", SafetyLevel.Suspicious),
             Global("__builtin__", "exec", SafetyLevel.Dangerous),
             Global("os", "system", SafetyLevel.Dangerous),
+            Global("os", "system", SafetyLevel.Dangerous),
             Global("operator", "attrgetter", SafetyLevel.Dangerous),
             Global("builtins", "__import__", SafetyLevel.Suspicious),
             Global("pickle", "loads", SafetyLevel.Dangerous),
             Global("_pickle", "loads", SafetyLevel.Dangerous),
             Global("_codecs", "encode", SafetyLevel.Suspicious),
         ],
-        scanned_files=26,
-        issues_count=24,
-        infected_files=21,
+        scanned_files=27,
+        issues_count=25,
+        infected_files=22,
+        scan_err=True,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 
@@ -610,3 +640,14 @@ def test_pickle_files():
         assert pickle.load(file) == 12345
     with open(f"{_root_path}/data/malicious13b.pkl", "rb") as file:
         assert pickle.load(file) == 12345
+
+
+def test_invalid_bytes_err():
+    malicious_invalid_bytes = ScanResult(
+        [Global("os", "system", SafetyLevel.Dangerous)], 1, 1, 1, True
+    )
+    with open(f"{_root_path}/data/malicious-invalid-bytes.pkl", "rb") as file:
+        compare_scan_results(
+            scan_pickle_bytes(file, f"{_root_path}/data/malicious-invalid-bytes.pkl"),
+            malicious_invalid_bytes,
+        )

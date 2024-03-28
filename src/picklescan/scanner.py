@@ -50,8 +50,9 @@ class ScanResult:
 
 
 class GenOpsError(Exception):
-    def __init__(self, msg: str):
+    def __init__(self, msg: str, globals: Optional[Set[Tuple[str, str]]]):
         self.msg = msg
+        self.globals = globals
         super().__init__()
 
     def __str__(self) -> str:
@@ -167,7 +168,6 @@ def _http_get(url) -> bytes:
 
 
 def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]]:
-
     globals = set()
 
     memo = {}
@@ -178,7 +178,11 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
         try:
             ops = list(pickletools.genops(data))
         except Exception as e:
-            raise GenOpsError(str(e))
+            # XXX: given we can have multiple pickles in a file, we may have already successfully extracted globals from a valid pickle.
+            # Thus return the already found globals in the error & let the caller decide what to do.
+            globals_opt = globals if len(globals) > 0 else None
+            raise GenOpsError(str(e), globals_opt)
+
         last_byte = data.read(1)
         data.seek(-1, 1)
 
@@ -232,18 +236,12 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
     return globals
 
 
-def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanResult:
-    """Disassemble a Pickle stream and report issues"""
-
+def _build_scan_result_from_raw_globals(
+    raw_globals: Set[Tuple[str, str]],
+    file_id,
+    scan_err=False,
+) -> ScanResult:
     globals = []
-    try:
-        raw_globals = _list_globals(data, multiple_pickles)
-    except GenOpsError as e:
-        _log.error(f"ERROR: parsing pickle in {file_id}: {e}")
-        return ScanResult(globals, scan_err=True)
-
-    _log.debug("Global imports in %s: %s", file_id, raw_globals)
-
     issues_count = 0
     for rg in raw_globals:
         g = Global(rg[0], rg[1], SafetyLevel.Dangerous)
@@ -269,7 +267,26 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanRe
             g.safety = SafetyLevel.Suspicious
         globals.append(g)
 
-    return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, False)
+    return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, scan_err)
+
+
+def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanResult:
+    """Disassemble a Pickle stream and report issues"""
+
+    try:
+        raw_globals = _list_globals(data, multiple_pickles)
+    except GenOpsError as e:
+        _log.error(f"ERROR: parsing pickle in {file_id}: {e}")
+        if e.globals is not None:
+            return _build_scan_result_from_raw_globals(
+                e.globals, file_id, scan_err=True
+            )
+        else:
+            return ScanResult([], scan_err=True)
+
+    _log.debug("Global imports in %s: %s", file_id, raw_globals)
+
+    return _build_scan_result_from_raw_globals(raw_globals, file_id)
 
 
 def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
@@ -288,7 +305,6 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
 
 
 def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
-
     # Delay import to avoid dependency on NumPy
     import numpy as np
 
