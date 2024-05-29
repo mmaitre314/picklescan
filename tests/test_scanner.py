@@ -3,6 +3,7 @@ import http.client
 import importlib
 import io
 import os
+import runpy
 import pickle
 import pytest
 import requests
@@ -81,6 +82,11 @@ class Malicious8:
 class Malicious13:
     def __reduce__(self):
         return pickle.loads, (b"I12345\n.",)  # Loads the value 12345
+
+
+class Malicious14:
+    def __reduce__(self):
+        return runpy._run_code, ("print('456')",)
 
 
 class HTTPResponse:
@@ -336,6 +342,9 @@ def initialize_pickle_files():
     initialize_pickle_file(
         f"{_root_path}/data/malicious13b.pkl", Malicious13(), 4
     )  # pickle module serialized as _pickle
+    initialize_pickle_file(
+        f"{_root_path}/data/malicious14.pkl", Malicious14(), 4
+    )  # runpy
 
     initialize_zip_file(
         f"{_root_path}/data/malicious1.zip",
@@ -552,6 +561,13 @@ def test_scan_file_path():
         scan_file_path(f"{_root_path}/data/bad_pytorch.pt"), bad_pytorch
     )
 
+    malicious14 = ScanResult(
+        [Global("runpy", "_run_code", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious14.pkl"), malicious14
+    )
+
 
 def test_scan_directory_path():
     sr = ScanResult(
@@ -578,6 +594,7 @@ def test_scan_directory_path():
             Global("requests.api", "get", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
+            Global("runpy", "_run_code", SafetyLevel.Dangerous),
             Global("socket", "create_connection", SafetyLevel.Dangerous),
             Global("collections", "OrderedDict", SafetyLevel.Innocuous),
             Global("torch._utils", "_rebuild_tensor_v2", SafetyLevel.Innocuous),
@@ -594,9 +611,9 @@ def test_scan_directory_path():
             Global("_pickle", "loads", SafetyLevel.Dangerous),
             Global("_codecs", "encode", SafetyLevel.Suspicious),
         ],
-        scanned_files=27,
-        issues_count=25,
-        infected_files=22,
+        scanned_files=28,
+        issues_count=26,
+        infected_files=23,
         scan_err=True,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
