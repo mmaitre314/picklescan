@@ -1,7 +1,17 @@
-# Python Pickle Malware Scanner
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="img/banner_dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="img/banner_light.svg">
+    <img alt="Python Pickle Malware Scanner" src="img/banner_light.svg" width="445" height="105" style="max-width: 100%;">
+  </picture>
+  <br/>
+  <br/>
+</p>
 
-[![PyPI](https://badge.fury.io/py/picklescan.svg)](https://pypi.org/project/picklescan/)
-[![Test](https://github.com/mmaitre314/picklescan/workflows/Test/badge.svg)](https://github.com/mmaitre314/picklescan/actions/workflows/test.yml)
+<p align="center">
+  <a href="https://pypi.org/project/picklescan/"><img alt="PyPI" src="https://badge.fury.io/py/picklescan.svg"></a>
+  <a href="https://github.com/mmaitre314/picklescan/actions/workflows/test.yml"><img alt="Test" src="https://github.com/mmaitre314/picklescan/workflows/Test/badge.svg"></a>
+</p>
 
 Security scanner detecting Python Pickle files performing suspicious actions.
 
