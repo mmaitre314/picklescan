@@ -114,10 +114,13 @@ _unsafe_globals = {
     "socket": "*",
     "subprocess": "*",
     "sys": "*",
+    "shutil": "*",
     "runpy": "*",  # Includes runpy._run_code
     "operator": "attrgetter",  # Ex of code execution: operator.attrgetter("system")(__import__("os"))("echo pwned")
     "pickle": "*",
     "_pickle": "*",
+    "bdb": "*",
+    "pdb": "*",
 }
 
 #

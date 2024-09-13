@@ -1,4 +1,5 @@
 import aiohttp
+import bdb
 import http.client
 import importlib
 import io
@@ -87,6 +88,15 @@ class Malicious13:
 class Malicious14:
     def __reduce__(self):
         return runpy._run_code, ("print('456')",)
+
+
+class Malicious15:
+    def __reduce__(self):
+        bd = bdb.Bdb()
+        return bdb.Bdb.run, (
+            bd,
+            'import os\nos.system("whoami")',
+        )
 
 
 class HTTPResponse:
@@ -345,6 +355,8 @@ def initialize_pickle_files():
     initialize_pickle_file(
         f"{_root_path}/data/malicious14.pkl", Malicious14(), 4
     )  # runpy
+    initialize_pickle_file(f"{_root_path}/data/malicious15a.pkl", Malicious15(), 2)
+    initialize_pickle_file(f"{_root_path}/data/malicious15b.pkl", Malicious15(), 4)
 
     initialize_zip_file(
         f"{_root_path}/data/malicious1.zip",
@@ -590,6 +602,7 @@ def test_scan_directory_path():
             Global("__builtin__", "dict", SafetyLevel.Suspicious),
             Global("__builtin__", "apply", SafetyLevel.Dangerous),
             Global("__builtin__", "getattr", SafetyLevel.Dangerous),
+            Global("__builtin__", "getattr", SafetyLevel.Dangerous),
             Global("__builtin__", "globals", SafetyLevel.Suspicious),
             Global("requests.api", "get", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
@@ -610,10 +623,13 @@ def test_scan_directory_path():
             Global("pickle", "loads", SafetyLevel.Dangerous),
             Global("_pickle", "loads", SafetyLevel.Dangerous),
             Global("_codecs", "encode", SafetyLevel.Suspicious),
+            Global("bdb", "Bdb", SafetyLevel.Dangerous),
+            Global("bdb", "Bdb", SafetyLevel.Dangerous),
+            Global("bdb", "Bdb.run", SafetyLevel.Dangerous),
         ],
-        scanned_files=28,
-        issues_count=26,
-        infected_files=23,
+        scanned_files=30,
+        issues_count=30,
+        infected_files=25,
         scan_err=True,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
