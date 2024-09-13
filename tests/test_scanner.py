@@ -93,7 +93,10 @@ class Malicious14:
 class Malicious15:
     def __reduce__(self):
         bd = bdb.Bdb()
-        return bdb.Bdb.run, (bd, 'import os\nos.system("whoami")', )
+        return bdb.Bdb.run, (
+            bd,
+            'import os\nos.system("whoami")',
+        )
 
 
 class HTTPResponse:
