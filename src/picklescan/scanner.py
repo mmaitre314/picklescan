@@ -121,6 +121,7 @@ _unsafe_globals = {
     "_pickle": "*",
     "bdb": "*",
     "pdb": "*",
+    "asyncio": "*",
 }
 
 #
