@@ -82,6 +82,13 @@ _safe_globals = {
         "IntStorage",
         "ByteStorage",
     },
+    "numpy": {
+        "dtype",
+        "ndarray",
+    },
+    "numpy.core.multiarray": {
+        "_reconstruct",
+    },
     "torch._utils": {"_rebuild_tensor_v2"},
 }
 
@@ -141,8 +148,7 @@ _unsafe_globals = {
 # https://www.tensorflow.org/api_docs/python/tf/keras/models/load_model
 #
 
-# TODO: support .npz files
-_numpy_file_extensions = {".npy"}
+_numpy_file_extensions = {".npy"}  # Note: .npz is handled as zip files
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data"}
 _zip_file_extensions = {".zip", ".npz"}
@@ -301,10 +307,15 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
         file_names = zip.namelist()
         _log.debug("Files in archive %s: %s", file_id, file_names)
         for file_name in file_names:
-            if os.path.splitext(file_name)[1] in _pickle_file_extensions:
+            file_ext = os.path.splitext(file_name)[1]
+            if file_ext in _pickle_file_extensions:
                 _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                 with zip.open(file_name, "r") as file:
                     result.merge(scan_pickle_bytes(file, f"{file_id}:{file_name}"))
+            elif file_ext in _numpy_file_extensions:
+                _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
+                with zip.open(file_name, "r") as file:
+                    result.merge(scan_numpy(file, f"{file_id}:{file_name}"))
 
     return result
 
@@ -323,7 +334,7 @@ def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
     data.seek(-min(N, len(magic)), 1)  # back-up
     if magic.startswith(_ZIP_PREFIX) or magic.startswith(_ZIP_SUFFIX):
         # .npz file
-        raise NotImplementedError("Scanning of .npz files is not implemented yet")
+        raise ValueError(f".npz file not handled as zip file: {file_id}")
     elif magic == np.lib.format.MAGIC_PREFIX:
         # .npy file
 

@@ -1,0 +1,7 @@
+*.pkl binary
+*.pickle binary
+*.bin binary
+*.pt binary
+*.zip binary
+*.npy binary
+*.npz binary
