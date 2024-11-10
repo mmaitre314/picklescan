@@ -183,15 +183,50 @@ def initialize_zip_file(path, file_name, data):
             zip.writestr(file_name, data)
 
 
-def initialize_numpy_file(path):
+def initialize_numpy_files():
     import numpy as np
 
-    # create numpy object array
-    with open(path, "wb") as f:
-        data = [(1, 2), (3, 4)]
+    os.makedirs(f"{_root_path}/data2", exist_ok=True)
+
+    path = f"{_root_path}/data2/object_array.npy"
+    if not os.path.exists(path):
         x = np.empty((2, 2), dtype=object)
-        x[:] = data
-        np.save(f, x)
+        x[:] = [(1, 2), (3, 4)]
+        np.save(path, x)
+
+    path = f"{_root_path}/data2/int_array.npy"
+    if not os.path.exists(path):
+        x = np.empty((2, 2), dtype=int)
+        x[:] = [(1, 2), (3, 4)]
+        np.save(path, x)
+
+    path = f"{_root_path}/data2/object_arrays.npz"
+    if not os.path.exists(path):
+        np.savez(
+            path,
+            a=np.array([0, 1, 2], dtype=object),
+            b=np.array([3, 4, 5], dtype=object),
+        )
+
+    path = f"{_root_path}/data2/int_arrays.npz"
+    if not os.path.exists(path):
+        np.savez(
+            path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int)
+        )
+
+    path = f"{_root_path}/data2/object_arrays_compressed.npz"
+    if not os.path.exists(path):
+        np.savez_compressed(
+            path,
+            a=np.array([0, 1, 2], dtype=object),
+            b=np.array([3, 4, 5], dtype=object),
+        )
+
+    path = f"{_root_path}/data2/int_arrays_compressed.npz"
+    if not os.path.exists(path):
+        np.savez_compressed(
+            path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int)
+        )
 
 
 def initialize_pickle_files():
@@ -364,13 +399,12 @@ def initialize_pickle_files():
         pickle.dumps(Malicious1(), protocol=4),
     )
 
-    initialize_numpy_file(f"{_root_path}/data/object_array.npy")
-
     # Fake PyTorch file (PNG file format) simulating https://huggingface.co/RectalWorm/loras_new/blob/main/Owl_Mage_no_background.pt
     initialize_data_file(f"{_root_path}/data/bad_pytorch.pt", b"\211PNG\r\n\032\n")
 
 
 initialize_pickle_files()
+initialize_numpy_files()
 
 
 def compare_scan_results(sr1: ScanResult, sr2: ScanResult):
@@ -411,19 +445,32 @@ def test_scan_zip_bytes():
 
 
 def test_scan_numpy():
-    scan_result = ScanResult(
-        [
-            Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Suspicious),
-            Global("numpy", "ndarray", SafetyLevel.Suspicious),
-            Global("numpy", "dtype", SafetyLevel.Suspicious),
-        ],
-        1,
-        0,
-        0,
-    )
-    with open(f"{_root_path}/data/object_array.npy", "rb") as f:
+    with open(f"{_root_path}/data2/object_array.npy", "rb") as f:
         compare_scan_results(
-            scan_numpy(io.BytesIO(f.read()), "object_array.npy"), scan_result
+            scan_numpy(io.BytesIO(f.read()), "object_array.npy"),
+            ScanResult(
+                [
+                    Global(
+                        "numpy.core.multiarray", "_reconstruct", SafetyLevel.Innocuous
+                    ),
+                    Global("numpy", "ndarray", SafetyLevel.Innocuous),
+                    Global("numpy", "dtype", SafetyLevel.Innocuous),
+                ],
+                1,
+                0,
+                0,
+            ),
+        )
+
+    with open(f"{_root_path}/data2/int_array.npy", "rb") as f:
+        compare_scan_results(
+            scan_numpy(io.BytesIO(f.read()), "int_array.npy"),
+            ScanResult(
+                [],
+                1,
+                0,
+                0,
+            ),
         )
 
 
@@ -578,6 +625,59 @@ def test_scan_file_path():
     )
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious14.pkl"), malicious14
+    )
+
+
+def test_scan_file_path_npz():
+
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/object_arrays.npz"),
+        ScanResult(
+            [
+                Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Innocuous),
+                Global("numpy", "ndarray", SafetyLevel.Innocuous),
+                Global("numpy", "dtype", SafetyLevel.Innocuous),
+            ]
+            * 2,
+            2,
+            0,
+            0,
+        ),
+    )
+
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/int_arrays.npz"),
+        ScanResult(
+            [],
+            2,
+            0,
+            0,
+        ),
+    )
+
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/object_arrays_compressed.npz"),
+        ScanResult(
+            [
+                Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Innocuous),
+                Global("numpy", "ndarray", SafetyLevel.Innocuous),
+                Global("numpy", "dtype", SafetyLevel.Innocuous),
+            ]
+            * 2,
+            2,
+            0,
+            0,
+        ),
+    )
+
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/int_arrays_compressed.npz"),
+        ScanResult(
+            [],
+            2,
+            0,
+            0,
+        ),
     )
 
 
