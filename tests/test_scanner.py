@@ -323,6 +323,12 @@ def initialize_pickle_files():
         ),
     )
 
+    # Broken model
+    initialize_data_file(
+        f"{_root_path}/data/broken_model.pkl",
+        b"cbuiltins\nexec\n(X>\nf = open('my_file.txt', 'a'); f.write('Malicious'); f.close()tRX.",
+    )
+
     # Code which created malicious12.pkl using pickleassem (see https://github.com/gousaiyang/pickleassem)
     #
     # p = PickleAssembler(proto=4)
@@ -629,7 +635,6 @@ def test_scan_file_path():
 
 
 def test_scan_file_path_npz():
-
     compare_scan_results(
         scan_file_path(f"{_root_path}/data2/object_arrays.npz"),
         ScanResult(
@@ -726,10 +731,11 @@ def test_scan_directory_path():
             Global("bdb", "Bdb", SafetyLevel.Dangerous),
             Global("bdb", "Bdb", SafetyLevel.Dangerous),
             Global("bdb", "Bdb.run", SafetyLevel.Dangerous),
+            Global("builtins", "exec", SafetyLevel.Dangerous),
         ],
-        scanned_files=30,
-        issues_count=30,
-        infected_files=25,
+        scanned_files=31,
+        issues_count=31,
+        infected_files=26,
         scan_err=True,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
