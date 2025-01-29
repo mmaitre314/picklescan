@@ -184,16 +184,15 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
     memo = {}
     # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
     last_byte = b"dummy"
+    parsing_pkl_error = None
     while last_byte != b"":
         # List opcodes
+        ops = []
         try:
-            ops = list(pickletools.genops(data))
+            for op in pickletools.genops(data):
+                ops.append(op)
         except Exception as e:
-            # XXX: given we can have multiple pickles in a file, we may have already successfully extracted globals from a valid pickle.
-            # Thus return the already found globals in the error & let the caller decide what to do.
-            globals_opt = globals if len(globals) > 0 else None
-            raise GenOpsError(str(e), globals_opt)
-
+            parsing_pkl_error = str(e)
         last_byte = data.read(1)
         data.seek(-1, 1)
 
@@ -243,6 +242,14 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
 
         if not multiple_pickles:
             break
+
+        if parsing_pkl_error is not None:
+            # XXX: given we can have multiple pickles in a file, we may have already successfully extracted globals from a valid pickle.
+            # Thus return the already found globals in the error & let the caller decide what to do.
+            # Additionally, we return the error at the end of the loop to scan imports in partially broken files,
+            # which can unpickle and be dangerous regardless of being valid pickle.
+            globals_opt = globals if len(globals) > 0 else None
+            raise GenOpsError(parsing_pkl_error, globals_opt)
 
     return globals
 
