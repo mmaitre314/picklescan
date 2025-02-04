@@ -4,10 +4,12 @@ import http.client
 import importlib
 import io
 import os
-import runpy
+import pathlib
 import pickle
+import py7zr
 import pytest
 import requests
+import runpy
 import socket
 import subprocess
 import sys
@@ -175,6 +177,18 @@ def initialize_data_file(path, data):
     if not os.path.exists(path):
         with open(path, "wb") as file:
             file.write(data)
+
+
+def initialize_7z_file(archive_path, file_name):
+    file_path = f"{_root_path}/data/malicious1.pkl"
+    with open(file_path, "wb") as f:
+        pickle.dump(Malicious1(), f, protocol=4)
+
+    if not os.path.exists(archive_path):
+        with py7zr.SevenZipFile(archive_path, "w") as archive:
+            archive.write(file_path, file_name)
+
+    pathlib.Path.unlink(pathlib.Path(file_path))
 
 
 def initialize_zip_file(path, file_name, data):
@@ -398,6 +412,11 @@ def initialize_pickle_files():
     )  # runpy
     initialize_pickle_file(f"{_root_path}/data/malicious15a.pkl", Malicious15(), 2)
     initialize_pickle_file(f"{_root_path}/data/malicious15b.pkl", Malicious15(), 4)
+
+    initialize_7z_file(
+        f"{_root_path}/data/malicious1.7z",
+        "data.pkl",
+    )
 
     initialize_zip_file(
         f"{_root_path}/data/malicious1.zip",
@@ -732,10 +751,11 @@ def test_scan_directory_path():
             Global("bdb", "Bdb", SafetyLevel.Dangerous),
             Global("bdb", "Bdb.run", SafetyLevel.Dangerous),
             Global("builtins", "exec", SafetyLevel.Dangerous),
+            Global("builtins", "eval", SafetyLevel.Dangerous),
         ],
-        scanned_files=31,
-        issues_count=31,
-        infected_files=26,
+        scanned_files=32,
+        issues_count=32,
+        infected_files=27,
         scan_err=True,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
