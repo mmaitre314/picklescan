@@ -6,8 +6,12 @@ import json
 import logging
 import os
 import pickletools
+import py7zr
+import random
+import shutil
+import string
 from tarfile import TarError
-from typing import IO, List, Optional, Set, Tuple
+from typing import IO, BinaryIO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 
@@ -151,7 +155,23 @@ _unsafe_globals = {
 _numpy_file_extensions = {".npy"}  # Note: .npz is handled as zip files
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data"}
-_zip_file_extensions = {".zip", ".npz"}
+_zip_file_extensions = {".zip", ".npz", ".7z"}
+
+
+def _is_7z_file(f: IO[bytes]) -> bool:
+    read_bytes = []
+    start = f.tell()
+
+    byte = f.read(1)
+    while byte != b"":
+        read_bytes.append(byte)
+        if len(read_bytes) == 6:
+            break
+        byte = f.read(1)
+    f.seek(start)
+
+    local_header_magic_number = [b"7", b"z", b"\xbc", b"\xaf", b"\x27", b"\x1c"]
+    return read_bytes == local_header_magic_number
 
 
 def _http_get(url) -> bytes:
@@ -307,12 +327,35 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanRe
     return _build_scan_result_from_raw_globals(raw_globals, file_id)
 
 
+# XXX: it appears there is not way to get the byte stream for a given file within the 7z archive and thus forcing us to unzip to disk before scanning
+def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
+    result = ScanResult([])
+
+    archive = py7zr.SevenZipFile(data, mode="r")
+    file_names = archive.getnames()
+    _log.debug("Files in 7z archive %s: %s", file_id, file_names)
+    rand_id = "".join(random.choice(string.ascii_letters) for _ in range(8))
+    tmp_path = f"/tmp/archive-{rand_id}"
+    archive.extractall(tmp_path)
+    for file_name in file_names:
+        file_path = f"{tmp_path}/{file_name}"
+        file_ext = os.path.splitext(file_name)[1]
+        if file_ext in _pickle_file_extensions:
+            _log.debug("Scanning file %s in 7z archive %s", file_name, file_id)
+            if os.path.isfile(file_path):
+                result.merge(scan_file_path(file_path))
+
+    shutil.rmtree(tmp_path)
+
+    return result
+
+
 def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
     result = ScanResult([])
 
     with zipfile.ZipFile(data, "r") as zip:
         file_names = zip.namelist()
-        _log.debug("Files in archive %s: %s", file_id, file_names)
+        _log.debug("Files in zip archive %s: %s", file_id, file_names)
         for file_name in file_names:
             file_ext = os.path.splitext(file_name)[1]
             if file_ext in _pickle_file_extensions:
@@ -361,6 +404,8 @@ def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
     # new pytorch format
     if _is_zipfile(data):
         return scan_zip_bytes(data, file_id)
+    elif _is_7z_file(data):
+        return scan_7z_bytes(data, file_id)
     # old pytorch format
     else:
         scan_result = ScanResult([])
@@ -395,11 +440,12 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> Scan
     else:
         is_zip = zipfile.is_zipfile(data)
         data.seek(0)
-        return (
-            scan_zip_bytes(data, file_id)
-            if is_zip
-            else scan_pickle_bytes(data, file_id)
-        )
+        if is_zip:
+            return scan_zip_bytes(data, file_id)
+        elif _is_7z_file(data):
+            return scan_7z_bytes(data, file_id)
+        else:
+            return scan_pickle_bytes(data, file_id)
 
 
 def scan_huggingface_model(repo_id):
