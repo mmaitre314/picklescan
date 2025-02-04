@@ -11,7 +11,7 @@ import random
 import shutil
 import string
 from tarfile import TarError
-from typing import IO, BinaryIO, List, Optional, Set, Tuple
+from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 

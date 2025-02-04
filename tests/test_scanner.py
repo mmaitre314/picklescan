@@ -24,7 +24,6 @@ from picklescan.scanner import (
     _http_get,
     _list_globals,
     scan_pickle_bytes,
-    scan_7z_bytes,
     scan_zip_bytes,
     scan_directory_path,
     scan_file_path,
