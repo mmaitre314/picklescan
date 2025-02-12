@@ -338,7 +338,7 @@ def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
         file_names = archive.getnames()
         targets = [f for f in file_names if f.endswith(tuple(_pickle_file_extensions))]
         _log.debug("Files in 7z archive %s: %s", file_id, targets)
-        with TemporaryDirectory(delete=False) as tmpdir:
+        with TemporaryDirectory() as tmpdir:
             archive.extract(path=tmpdir, targets=targets)
             for file_name in targets:
                 file_path = os.path.join(tmpdir, file_name)
