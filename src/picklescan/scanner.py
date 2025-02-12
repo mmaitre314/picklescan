@@ -6,11 +6,8 @@ import json
 import logging
 import os
 import pickletools
-import py7zr
-import random
-import shutil
-import string
 from tarfile import TarError
+from tempfile import TemporaryDirectory
 from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
@@ -329,25 +326,27 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanRe
 
 # XXX: it appears there is not way to get the byte stream for a given file within the 7z archive and thus forcing us to unzip to disk before scanning
 def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
+    try:
+        import py7zr
+    except ImportError:
+        raise Exception(
+            "py7zr is required to scan 7z archives, install picklescan using: 'pip install picklescan[7z]'"
+        )
     result = ScanResult([])
 
-    archive = py7zr.SevenZipFile(data, mode="r")
-    file_names = archive.getnames()
-    _log.debug("Files in 7z archive %s: %s", file_id, file_names)
-    rand_id = "".join(random.choice(string.ascii_letters) for _ in range(8))
-    tmp_path = f"/tmp/archive-{rand_id}"
-    archive.extractall(tmp_path)
-    for file_name in file_names:
-        file_path = f"{tmp_path}/{file_name}"
-        file_ext = os.path.splitext(file_name)[1]
-        if file_ext in _pickle_file_extensions:
-            _log.debug("Scanning file %s in 7z archive %s", file_name, file_id)
-            if os.path.isfile(file_path):
-                result.merge(scan_file_path(file_path))
+    with py7zr.SevenZipFile(data, mode="r") as archive:
+        file_names = archive.getnames()
+        targets = [f for f in file_names if f.endswith(tuple(_pickle_file_extensions))]
+        _log.debug("Files in 7z archive %s: %s", file_id, targets)
+        with TemporaryDirectory(delete=False) as tmpdir:
+            archive.extract(path=tmpdir, targets=targets)
+            for file_name in targets:
+                file_path = os.path.join(tmpdir, file_name)
+                _log.debug("Scanning file %s in 7z archive %s", file_name, file_id)
+                if os.path.isfile(file_path):
+                    result.merge(scan_file_path(file_path))
 
-    shutil.rmtree(tmp_path)
-
-    return result
+            return result
 
 
 def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
