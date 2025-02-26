@@ -15,6 +15,7 @@ import subprocess
 import sys
 from unittest import TestCase
 import zipfile
+import pip
 
 from picklescan.cli import main
 from picklescan.scanner import (
@@ -100,6 +101,11 @@ class Malicious15:
             'import os\nos.system("whoami")',
         )
 
+class Malicious16:
+    def __reduce__(self):
+        return pip.main, (
+            ['install', 'some_malicious_package', '--no-input', '-q', '-q', '-q',
+             '--exists-action', 'i', '--isolated'],)
 
 class HTTPResponse:
     def __init__(self, status, data=None):
@@ -412,6 +418,7 @@ def initialize_pickle_files():
     )  # runpy
     initialize_pickle_file(f"{_root_path}/data/malicious15a.pkl", Malicious15(), 2)
     initialize_pickle_file(f"{_root_path}/data/malicious15b.pkl", Malicious15(), 4)
+    initialize_pickle_file(f"{_root_path}/data/malicious16.pkl", Malicious16(), 0)
 
     initialize_7z_file(
         f"{_root_path}/data/malicious1.7z",
@@ -752,10 +759,11 @@ def test_scan_directory_path():
             Global("bdb", "Bdb.run", SafetyLevel.Dangerous),
             Global("builtins", "exec", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
+            Global("pip", "main", SafetyLevel.Dangerous),
         ],
-        scanned_files=32,
-        issues_count=32,
-        infected_files=27,
+        scanned_files=33,
+        issues_count=33,
+        infected_files=28,
         scan_err=True,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)

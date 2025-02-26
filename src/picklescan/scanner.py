@@ -130,6 +130,7 @@ _unsafe_globals = {
     "bdb": "*",
     "pdb": "*",
     "asyncio": "*",
+    "pip": "*",
 }
 
 #
