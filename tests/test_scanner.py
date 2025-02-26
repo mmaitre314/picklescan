@@ -101,11 +101,23 @@ class Malicious15:
             'import os\nos.system("whoami")',
         )
 
+
 class Malicious16:
     def __reduce__(self):
         return pip.main, (
-            ['install', 'some_malicious_package', '--no-input', '-q', '-q', '-q',
-             '--exists-action', 'i', '--isolated'],)
+            [
+                "install",
+                "some_malicious_package",
+                "--no-input",
+                "-q",
+                "-q",
+                "-q",
+                "--exists-action",
+                "i",
+                "--isolated",
+            ],
+        )
+
 
 class HTTPResponse:
     def __init__(self, status, data=None):
