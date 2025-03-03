@@ -33,7 +33,11 @@ from picklescan.scanner import (
     scan_numpy,
     scan_pytorch,
 )
-
+import torch
+import torch._inductor.codecache as codecache
+import pydoc
+import venv
+from functools import partial
 
 _root_path = os.path.dirname(__file__)
 
@@ -99,6 +103,35 @@ class Malicious15:
         return bdb.Bdb.run, (
             bd,
             'import os\nos.system("whoami")',
+        )
+
+class Malicious17:
+    def __reduce__(self):
+        return codecache.compile_file, (
+            '', '', [
+                'sh',
+                '-c','$(echo "pwned")'
+            ]
+        )
+
+class Malicious18:
+    def __reduce__(self):
+        return pydoc.pipepager, (
+            '', 'echo "pwned"'
+        )
+
+class Malicious19:
+    def __init__(self, path, **kwargs):
+        self.path = path
+        self.kwargs = kwargs
+
+    def __reduce__(self):
+        return partial(torch.load, self.path, **self.kwargs), ()
+
+class Malicious20:
+    def __reduce__(self):
+        return venv.create, (
+            'venv', False, False, True, False, "$(echo pwned)"
         )
 
 
@@ -432,6 +465,14 @@ def initialize_pickle_files():
     initialize_pickle_file(f"{_root_path}/data/malicious15b.pkl", Malicious15(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious16.pkl", Malicious16(), 0)
 
+    initialize_pickle_file(f"{_root_path}/data/malicious17.pkl", Malicious17(), 4)
+    initialize_pickle_file(f"{_root_path}/data/malicious18.pkl", Malicious18(), 4)
+
+    # This exploit serializes kwargs and passes them into a torch.load call
+    initialize_pickle_file(f"{_root_path}/data/malicious19.pkl",
+                           Malicious19("some_other_model.bin", pickle_file='config.json', weights_only=False), 4)
+
+    initialize_pickle_file(f"{_root_path}/data/malicious20.pkl", Malicious20(), 4)
     initialize_7z_file(
         f"{_root_path}/data/malicious1.7z",
         "data.pkl",
@@ -783,12 +824,16 @@ def test_scan_directory_path():
             Global("bdb", "Bdb.run", SafetyLevel.Dangerous),
             Global("builtins", "exec", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
+            Global("venv", "create", SafetyLevel.Dangerous),
+            Global("torch._inductor.codecache", "compile_file", SafetyLevel.Dangerous),
+            Global("pydoc", "pipepager", SafetyLevel.Dangerous),
+            Global("torch.serialization", "load", SafetyLevel.Dangerous),
+            Global("functools", "partial", SafetyLevel.Dangerous),
             Global("pip", "main", SafetyLevel.Dangerous),
-            Global("builtins", "eval", SafetyLevel.Dangerous),
         ],
-        scanned_files=34,
-        issues_count=34,
-        infected_files=29,
+        scanned_files=37,
+        issues_count=38,
+        infected_files=31,
         scan_err=True,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)

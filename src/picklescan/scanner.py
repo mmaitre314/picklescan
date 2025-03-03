@@ -130,6 +130,11 @@ _unsafe_globals = {
     "bdb": "*",
     "pdb": "*",
     "asyncio": "*",
+    "pydoc": "pipepager", # pydoc.pipepager('help','echo pwned')
+    "venv": "*",
+    "torch.serialization": "load", # pickle could be used to load a different file
+    "functools": "partial", # functools.partial(os.system, "echo pwned")
+    "torch._inductor.codecache": "compile_file", # compile_file('', '', ['sh', '-c','$(echo pwned)'])
     "pip": "*",
 }
 
