@@ -6,16 +6,19 @@ import io
 import os
 import pathlib
 import pickle
+import pip
 import py7zr
+import pydoc
 import pytest
 import requests
 import runpy
 import socket
 import subprocess
 import sys
-from unittest import TestCase
+import venv
 import zipfile
-import pip
+from functools import partial
+from unittest import TestCase
 
 from picklescan.cli import main
 from picklescan.scanner import (
@@ -33,11 +36,14 @@ from picklescan.scanner import (
     scan_numpy,
     scan_pytorch,
 )
-import torch
-import torch._inductor.codecache as codecache
-import pydoc
-import venv
-from functools import partial
+
+try:
+    import torch
+    import torch._inductor.codecache as codecache
+except ImportError:
+    # If PyTorch test files need to be regenerated, run 'pip install torch==2.6.0' first
+    torch = None
+    codecache = None
 
 _root_path = os.path.dirname(__file__)
 
@@ -105,20 +111,16 @@ class Malicious15:
             'import os\nos.system("whoami")',
         )
 
+
 class Malicious17:
     def __reduce__(self):
-        return codecache.compile_file, (
-            '', '', [
-                'sh',
-                '-c','$(echo "pwned")'
-            ]
-        )
+        return codecache.compile_file, ("", "", ["sh", "-c", '$(echo "pwned")'])
+
 
 class Malicious18:
     def __reduce__(self):
-        return pydoc.pipepager, (
-            '', 'echo "pwned"'
-        )
+        return pydoc.pipepager, ("", 'echo "pwned"')
+
 
 class Malicious19:
     def __init__(self, path, **kwargs):
@@ -128,11 +130,10 @@ class Malicious19:
     def __reduce__(self):
         return partial(torch.load, self.path, **self.kwargs), ()
 
+
 class Malicious20:
     def __reduce__(self):
-        return venv.create, (
-            'venv', False, False, True, False, "$(echo pwned)"
-        )
+        return venv.create, ("venv", False, False, True, False, "$(echo pwned)")
 
 
 class Malicious16:
@@ -469,8 +470,13 @@ def initialize_pickle_files():
     initialize_pickle_file(f"{_root_path}/data/malicious18.pkl", Malicious18(), 4)
 
     # This exploit serializes kwargs and passes them into a torch.load call
-    initialize_pickle_file(f"{_root_path}/data/malicious19.pkl",
-                           Malicious19("some_other_model.bin", pickle_file='config.json', weights_only=False), 4)
+    initialize_pickle_file(
+        f"{_root_path}/data/malicious19.pkl",
+        Malicious19(
+            "some_other_model.bin", pickle_file="config.json", weights_only=False
+        ),
+        4,
+    )
 
     initialize_pickle_file(f"{_root_path}/data/malicious20.pkl", Malicious20(), 4)
     initialize_7z_file(
@@ -486,7 +492,7 @@ def initialize_pickle_files():
 
     initialize_zip_file(
         f"{_root_path}/data/malicious1_wrong_ext.zip",
-        "data.txt", # Pickle file with a non-standard extension
+        "data.txt",  # Pickle file with a non-standard extension
         pickle.dumps(Malicious1(), protocol=4),
     )
 
@@ -640,9 +646,7 @@ def test_scan_file_path():
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious1.zip"), malicious1
     )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1.7z"), malicious1
-    )
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1.7z"), malicious1)
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious1_wrong_ext.zip"), malicious1
     )
@@ -830,10 +834,11 @@ def test_scan_directory_path():
             Global("torch.serialization", "load", SafetyLevel.Dangerous),
             Global("functools", "partial", SafetyLevel.Dangerous),
             Global("pip", "main", SafetyLevel.Dangerous),
+            Global("builtins", "eval", SafetyLevel.Dangerous),
         ],
-        scanned_files=37,
-        issues_count=38,
-        infected_files=31,
+        scanned_files=38,
+        issues_count=39,
+        infected_files=33,
         scan_err=True,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
