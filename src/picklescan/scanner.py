@@ -130,11 +130,11 @@ _unsafe_globals = {
     "bdb": "*",
     "pdb": "*",
     "asyncio": "*",
-    "pydoc": "pipepager", # pydoc.pipepager('help','echo pwned')
+    "pydoc": "pipepager",  # pydoc.pipepager('help','echo pwned')
     "venv": "*",
-    "torch.serialization": "load", # pickle could be used to load a different file
-    "functools": "partial", # functools.partial(os.system, "echo pwned")
-    "torch._inductor.codecache": "compile_file", # compile_file('', '', ['sh', '-c','$(echo pwned)'])
+    "torch.serialization": "load",  # pickle could be used to load a different file
+    "functools": "partial",  # functools.partial(os.system, "echo pwned")
+    "torch._inductor.codecache": "compile_file",  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
     "pip": "*",
 }
 
@@ -159,7 +159,14 @@ _numpy_file_extensions = {".npy"}  # Note: .npz is handled as zip files
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data"}
 _zip_file_extensions = {".zip", ".npz", ".7z"}
-_pickle_magic_bytes = {b"\x80\x00", b"\x80\x01", b"\x80\x02", b"\x80\x03", b"\x80\x04", b"\x80\x05"}
+_pickle_magic_bytes = {
+    b"\x80\x00",
+    b"\x80\x01",
+    b"\x80\x02",
+    b"\x80\x03",
+    b"\x80\x04",
+    b"\x80\x05",
+}
 
 
 def _is_7z_file(f: IO[bytes]) -> bool:
@@ -355,6 +362,7 @@ def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
 
             return result
 
+
 def get_magic_bytes_from_zipfile(zip: zipfile.ZipFile, num_bytes=8):
     magic_bytes = {}
     for file_info in zip.infolist():
@@ -374,11 +382,15 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
         for file_name in file_names:
             magic_number = magic_bytes.get(file_name, b"")
             file_ext = os.path.splitext(file_name)[1]
-            if file_ext in _pickle_file_extensions or any(magic_number.startswith(mn) for mn in _pickle_magic_bytes):
+            if file_ext in _pickle_file_extensions or any(
+                magic_number.startswith(mn) for mn in _pickle_magic_bytes
+            ):
                 _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                 with zip.open(file_name, "r") as file:
                     result.merge(scan_pickle_bytes(file, f"{file_id}:{file_name}"))
-            elif file_ext in _numpy_file_extensions or magic_number.startswith(b"\x93NUMPY"):
+            elif file_ext in _numpy_file_extensions or magic_number.startswith(
+                b"\x93NUMPY"
+            ):
                 _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                 with zip.open(file_name, "r") as file:
                     result.merge(scan_numpy(file, f"{file_id}:{file_name}"))
