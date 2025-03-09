@@ -1,7 +1,11 @@
+# A more forgiving implementation of zipfile.ZipFile
+# Modified from Python code at
+# https://github.com/python/cpython/blob/edb69578ed74ff04ab78ab953355faa343a7e0ee/Lib/zipfile/__init__.py#L1606
+# Changes: removed flag/password/filename checks to align better with PyTorch's zip decoding
+
 import struct
 import zipfile
 
-# More forgiving implementation of zipfile.ZipFile
 _FH_SIGNATURE = 0
 _FH_FILENAME_LENGTH = 10
 _FH_EXTRA_FIELD_LENGTH = 11
@@ -13,7 +17,6 @@ sizeFileHeader = struct.calcsize(structFileHeader)
 
 class RelaxedZipFile(zipfile.ZipFile):
     def open(self, name, mode="r", pwd=None, *, force_zip64=False):
-        # near copy of zipfile.ZipFile.open with
         """Return file-like object for 'name'.
 
         name is a string for the file name within the ZIP file, or a ZipInfo
