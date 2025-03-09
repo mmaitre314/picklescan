@@ -681,9 +681,7 @@ def test_scan_file_path():
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious1_0x40.zip"), malicious1
     )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1.7z"), malicious1
-    )
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1.7z"), malicious1)
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious1_wrong_ext.zip"), malicious1
     )
@@ -875,11 +873,11 @@ def test_scan_directory_path():
             Global("builtins", "eval", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
+            Global("builtins", "eval", SafetyLevel.Dangerous),
         ],
-        scanned_files=38,
-        issues_count=39,
-        infected_files=33,
-        scan_err=True,
+        scanned_files=42,
+        issues_count=43,
+        infected_files=37,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 
