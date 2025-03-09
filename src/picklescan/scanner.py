@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
+from .relaxed_zipfile import RelaxedZipFile
 
 from .torch import (
     get_magic_number,
@@ -375,7 +376,7 @@ def get_magic_bytes_from_zipfile(zip: zipfile.ZipFile, num_bytes=8):
 def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
     result = ScanResult([])
 
-    with zipfile.ZipFile(data, "r") as zip:
+    with RelaxedZipFile(data, "r") as zip:
         magic_bytes = get_magic_bytes_from_zipfile(zip)
         file_names = zip.namelist()
         _log.debug("Files in zip archive %s: %s", file_id, file_names)

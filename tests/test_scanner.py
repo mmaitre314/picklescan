@@ -249,6 +249,22 @@ def initialize_zip_file(path, file_name, data):
             zip.writestr(file_name, data)
 
 
+def initialize_corrupt_zip_file_central_directory(path, file_name, data):
+    if not os.path.exists(path):
+        with zipfile.ZipFile(path, "w") as zip:
+            zip.writestr(file_name, data)
+
+        with open(path, "rb") as f:
+            data = f.read()
+
+        # Replace only the first occurrence of "data.pkl" with "datap.kl"
+        modified_data = data.replace(b"data.pkl", b"datap.kl", 1)
+
+        # Write back the modified content
+        with open(path, "wb") as f:
+            f.write(modified_data)
+
+
 def initialize_numpy_files():
     import numpy as np
 
@@ -490,6 +506,12 @@ def initialize_pickle_files():
         pickle.dumps(Malicious1(), protocol=4),
     )
 
+    initialize_corrupt_zip_file_central_directory(
+        f"{_root_path}/data/malicious1_central_directory.zip",
+        "data.pkl",
+        pickle.dumps(Malicious1(), protocol=4),
+    )
+
     initialize_zip_file(
         f"{_root_path}/data/malicious1_wrong_ext.zip",
         "data.txt",  # Pickle file with a non-standard extension
@@ -646,7 +668,22 @@ def test_scan_file_path():
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious1.zip"), malicious1
     )
-    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1.7z"), malicious1)
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious1_central_directory.zip"),
+        malicious1,
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious1_0x1.zip"), malicious1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious1_0x20.zip"), malicious1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious1_0x40.zip"), malicious1
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/malicious1.7z"), malicious1
+    )
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious1_wrong_ext.zip"), malicious1
     )
@@ -834,6 +871,9 @@ def test_scan_directory_path():
             Global("torch.serialization", "load", SafetyLevel.Dangerous),
             Global("functools", "partial", SafetyLevel.Dangerous),
             Global("pip", "main", SafetyLevel.Dangerous),
+            Global("builtins", "eval", SafetyLevel.Dangerous),
+            Global("builtins", "eval", SafetyLevel.Dangerous),
+            Global("builtins", "eval", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
         ],
         scanned_files=38,
