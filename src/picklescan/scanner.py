@@ -139,9 +139,9 @@ _unsafe_globals = {
     "_pickle": "*",
     "pip": "*",
     "pydoc": "pipepager",  # pydoc.pipepager('help','echo pwned')
+    "timeit": "*",
     "torch._inductor.codecache": "compile_file",  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
     "torch.serialization": "load",  # pickle could be used to load a different file
-    "timeit": "*",
     "venv": "*",
     "webbrowser": "*",  # Includes webbrowser.open()
 }
