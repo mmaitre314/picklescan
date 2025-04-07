@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="img/banner_dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="img/banner_light.svg">
-    <img alt="Python Pickle Malware Scanner" src="img/banner_light.svg" width="445" height="105" style="max-width: 100%;">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/mmaitre314/picklescan/raw/main/img/banner_dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/mmaitre314/picklescan/raw/main/img/banner_light.svg">
+    <img alt="Python Pickle Malware Scanner" src="https://github.com/mmaitre314/picklescan/raw/main/img/banner_light.svg" width="445" height="105" style="max-width: 100%;">
   </picture>
   <br/>
   <br/>
