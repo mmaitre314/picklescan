@@ -111,7 +111,9 @@ Tested on `Linux 5.10.102.1-microsoft-standard-WSL2 x86_64` (WSL2).
 
 ## References
 
-- [pickletools.py](https://github.com/python/cpython/blob/main/Lib/pickletools.py) -- The pickletool code is the most detailed documentation of the Pickle format.
+- [pickledoc](https://github.com/Legoclones/pickledoc) -- Non-official but in-depth documentation of the Pickle file format
+- [pickledbg](https://github.com/Legoclones/pickledbg) -- Step-by-step Pickle dissassembly debugger
+- [pickletools.py](https://github.com/python/cpython/blob/main/Lib/pickletools.py) -- The official "documentation" of the Pickle file format (where documentation == code).
 - [Machine Learning Attack Series: Backdooring Pickle Files](https://embracethered.com/blog/posts/2022/machine-learning-attack-series-injecting-code-pickle-files/), Johann Rehberger, 2022
 - [Hugging Face Pickle Scanning](https://huggingface.co/docs/hub/security-pickle), Luc Georges, 2022
 - [The hidden dangers of loading open-source AI models (ARBITRARY CODE EXPLOIT!](https://www.youtube.com/watch?v=2ethDz9KnLk), Yannic Kilcher, 2022
