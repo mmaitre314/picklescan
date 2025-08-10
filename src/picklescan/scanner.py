@@ -88,6 +88,9 @@ _safe_globals = {
         "dtype",
         "ndarray",
     },
+    "numpy._core.multiarray": {
+        "_reconstruct",
+    },
     "numpy.core.multiarray": {
         "_reconstruct",
     },
@@ -113,30 +116,34 @@ _unsafe_globals = {
         "open",
         "breakpoint",
     },  # Pickle versions 3, 4 have those function under 'builtins'
-    "webbrowser": "*",  # Includes webbrowser.open()
-    "httplib": "*",  # Includes http.client.HTTPSConnection()
-    "requests.api": "*",
     "aiohttp.client": "*",
-    "os": "*",
+    "asyncio": "*",
+    "bdb": "*",
+    "commands": "*",  # Python 2 precursor to subprocess
+    "functools": "partial",  # functools.partial(os.system, "echo pwned")
+    "httplib": "*",  # Includes http.client.HTTPSConnection()
+    "numpy.testing._private.utils": "*",  # runstring() in this module is a synonym for exec()
     "nt": "*",  # Alias for 'os' on Windows. Includes os.system()
     "posix": "*",  # Alias for 'os' on Linux. Includes os.system()
+    "operator": "attrgetter",  # Ex of code execution: operator.attrgetter("system")(__import__("os"))("echo pwned")
+    "os": "*",
+    "requests.api": "*",
+    "runpy": "*",  # Includes runpy._run_code
+    "shutil": "*",
     "socket": "*",
+    "ssl": "*",  # DNS exfiltration via ssl.get_server_certificate()
     "subprocess": "*",
     "sys": "*",
-    "shutil": "*",
-    "runpy": "*",  # Includes runpy._run_code
-    "operator": "attrgetter",  # Ex of code execution: operator.attrgetter("system")(__import__("os"))("echo pwned")
+    "pdb": "*",
     "pickle": "*",
     "_pickle": "*",
-    "bdb": "*",
-    "pdb": "*",
-    "asyncio": "*",
-    "pydoc": "pipepager",  # pydoc.pipepager('help','echo pwned')
-    "venv": "*",
-    "torch.serialization": "load",  # pickle could be used to load a different file
-    "functools": "partial",  # functools.partial(os.system, "echo pwned")
-    "torch._inductor.codecache": "compile_file",  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
     "pip": "*",
+    "pydoc": "pipepager",  # pydoc.pipepager('help','echo pwned')
+    "timeit": "*",
+    "torch._inductor.codecache": "compile_file",  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
+    "torch.serialization": "load",  # pickle could be used to load a different file
+    "venv": "*",
+    "webbrowser": "*",  # Includes webbrowser.open()
 }
 
 #

