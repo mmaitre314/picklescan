@@ -521,6 +521,22 @@ def initialize_pickle_files():
     # Fake PyTorch file (PNG file format) simulating https://huggingface.co/RectalWorm/loras_new/blob/main/Owl_Mage_no_background.pt
     initialize_data_file(f"{_root_path}/data/bad_pytorch.pt", b"\211PNG\r\n\032\n")
 
+    # https://github.com/mmaitre314/picklescan/security/advisories/GHSA-9gvj-pp9x-gcfr
+    initialize_data_file(
+        f"{_root_path}/data2/malicious21.pkl",
+        b"".join(
+            [
+                pickle.STRING + b"'os'\n",
+                pickle.STRING + b"'system'\n",
+                pickle.STACK_GLOBAL,
+                pickle.STRING + b"'ls'\n",
+                pickle.TUPLE1,
+                pickle.REDUCE,
+                pickle.STOP,
+            ]
+        ),
+    )
+
 
 initialize_pickle_files()
 initialize_numpy_files()
@@ -761,6 +777,20 @@ def test_scan_file_path():
     )
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious14.pkl"), malicious14
+    )
+
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/malicious21.pkl"),
+        ScanResult(
+            [
+                Global(
+                    "os", "system", SafetyLevel.Dangerous
+                ),
+            ],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
     )
 
 

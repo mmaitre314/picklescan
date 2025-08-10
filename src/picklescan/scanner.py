@@ -245,7 +245,7 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                 globals.add(tuple(op_value.split(" ", 1)))
             elif op_name == "STACK_GLOBAL":
                 values = []
-                for offset in range(1, n):
+                for offset in range(1, n+1):
                     if ops[n - offset][0].name in [
                         "MEMOIZE",
                         "PUT",
@@ -260,6 +260,9 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                         "UNICODE",
                         "BINUNICODE",
                         "BINUNICODE8",
+                        "STRING",
+                        "BINSTRING",
+                        "SHORT_BINSTRING",
                     ]:
                         _log.debug(
                             "Presence of non-string opcode, categorizing as an unknown dangerous import"
