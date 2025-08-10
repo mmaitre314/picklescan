@@ -252,7 +252,7 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                 globals.add(tuple(op_value.split(" ", 1)))
             elif op_name == "STACK_GLOBAL":
                 values = []
-                for offset in range(1, n+1):
+                for offset in range(1, n + 1):
                     if ops[n - offset][0].name in [
                         "MEMOIZE",
                         "PUT",

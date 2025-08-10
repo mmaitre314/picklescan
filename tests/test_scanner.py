@@ -559,9 +559,10 @@ def initialize_pickle_files():
 
     initialize_pickle_file(f"{_root_path}/data2/malicious21.pkl", Malicious21(), 4)
     initialize_pickle_file(f"{_root_path}/data2/malicious22.pkl", Malicious22(), 4)
+
     # https://github.com/mmaitre314/picklescan/security/advisories/GHSA-9gvj-pp9x-gcfr
     initialize_data_file(
-        f"{_root_path}/data2/malicious21.pkl",
+        f"{_root_path}/data2/malicious23.pkl",
         b"".join(
             [
                 pickle.STRING + b"'os'\n",
@@ -843,19 +844,6 @@ def test_scan_file_path():
             infected_files=1,
         ),
     )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data2/malicious21.pkl"),
-        ScanResult(
-            [
-                Global(
-                    "os", "system", SafetyLevel.Dangerous
-                ),
-            ],
-            scanned_files=1,
-            issues_count=1,
-            infected_files=1,
-        ),
-    )
 
     compare_scan_results(
         scan_file_path(f"{_root_path}/data2/malicious22.pkl"),
@@ -871,6 +859,17 @@ def test_scan_file_path():
         ),
     )
 
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/malicious23.pkl"),
+        ScanResult(
+            [
+                Global("os", "system", SafetyLevel.Dangerous),
+            ],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
 
 
 def test_scan_file_path_npz():
