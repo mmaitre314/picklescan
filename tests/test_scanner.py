@@ -1039,3 +1039,144 @@ def test_invalid_bytes_err():
             scan_pickle_bytes(file, f"{_root_path}/data/malicious-invalid-bytes.pkl"),
             malicious_invalid_bytes,
         )
+
+
+# --- GHSA repro tests from bugs/ ---
+
+def _pickle_global(module: str, name: str) -> bytes:
+    # Minimal protocol 0 pickle that pushes a global and stops
+    return b"c" + module.encode() + b"\n" + name.encode() + b"\n."
+
+
+def test_GHSA_4r9r_ch6f_vxmx_run_cprofile_flagged():
+    data = _pickle_global("torch.utils.bottleneck.__main__", "run_cprofile")
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(data), "ghsa-4r9r"),
+        ScanResult(
+            [Global("torch.utils.bottleneck.__main__", "run_cprofile", SafetyLevel.Dangerous)],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
+
+
+def test_GHSA_86cj_95qr_2p4f_guardbuilder_get_flagged():
+    data = _pickle_global("torch._dynamo.guards", "GuardBuilder.get")
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(data), "ghsa-86cj"),
+        ScanResult(
+            [Global("torch._dynamo.guards", "GuardBuilder.get", SafetyLevel.Dangerous)],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
+
+
+def test_GHSA_f4x7_rfwp_v3xw_shapeenv_eval_flagged():
+    data = _pickle_global(
+        "torch.fx.experimental.symbolic_shapes", "ShapeEnv.evaluate_guards_expression"
+    )
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(data), "ghsa-f4x7"),
+        ScanResult(
+            [
+                Global(
+                    "torch.fx.experimental.symbolic_shapes",
+                    "ShapeEnv.evaluate_guards_expression",
+                    SafetyLevel.Dangerous,
+                )
+            ],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
+
+
+def test_GHSA_f745_w6jp_hpxx_collect_env_run_flagged():
+    data = _pickle_global("torch.utils.collect_env", "run")
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(data), "ghsa-f745"),
+        ScanResult(
+            [Global("torch.utils.collect_env", "run", SafetyLevel.Dangerous)],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
+
+
+def test_GHSA_h3qp_7fh3_f8h4_datapipes_decoder_flagged():
+    data = _pickle_global(
+        "torch.utils.data.datapipes.utils.decoder", "basichandlers"
+    )
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(data), "ghsa-h3qp"),
+        ScanResult(
+            [
+                Global(
+                    "torch.utils.data.datapipes.utils.decoder",
+                    "basichandlers",
+                    SafetyLevel.Dangerous,
+                )
+            ],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
+
+
+def test_GHSA_jhph_76pp_mggw_collect_env_run_and_read_all_flagged():
+    data = _pickle_global("torch.utils.collect_env", "run_and_read_all")
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(data), "ghsa-jhph"),
+        ScanResult(
+            [
+                Global(
+                    "torch.utils.collect_env",
+                    "run_and_read_all",
+                    SafetyLevel.Dangerous,
+                )
+            ],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
+
+
+def test_GHSA_vr7h_p6mm_wpmh_jit_execWrapper_flagged():
+    data = _pickle_global("torch.jit.unsupported_tensor_ops", "execWrapper")
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(data), "ghsa-vr7h"),
+        ScanResult(
+            [
+                Global(
+                    "torch.jit.unsupported_tensor_ops",
+                    "execWrapper",
+                    SafetyLevel.Dangerous,
+                )
+            ],
+            scanned_files=1,
+            issues_count=1,
+            infected_files=1,
+        ),
+    )
+
+
+def test_GHSA_vv6j_3g6g_2pvj_config_module_load_config_flagged():
+    # Be lenient: mark both possible names as dangerous
+    for fun in ("load_config", "ConfigModule.load_config"):
+        data = _pickle_global("torch.utils._config_module", fun)
+        compare_scan_results(
+            scan_pickle_bytes(io.BytesIO(data), f"ghsa-vv6j:{fun}"),
+            ScanResult(
+                [Global("torch.utils._config_module", fun, SafetyLevel.Dangerous)],
+                scanned_files=1,
+                issues_count=1,
+                infected_files=1,
+            ),
+        )

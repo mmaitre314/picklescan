@@ -140,6 +140,14 @@ _unsafe_globals = {
     "pip": "*",
     "pydoc": "pipepager",  # pydoc.pipepager('help','echo pwned')
     "timeit": "*",
+    # GHSA reports: additional dangerous PyTorch surfaces
+    "torch.utils.bottleneck.__main__": {"run_cprofile"},
+    "torch._dynamo.guards": {"GuardBuilder.get"},
+    "torch.fx.experimental.symbolic_shapes": {"ShapeEnv.evaluate_guards_expression"},
+    "torch.utils.collect_env": {"run", "run_and_read_all"},
+    "torch.utils.data.datapipes.utils.decoder": {"basichandlers"},
+    "torch.jit.unsupported_tensor_ops": {"execWrapper"},
+    "torch.utils._config_module": {"load_config", "ConfigModule.load_config"},
     "torch._inductor.codecache": "compile_file",  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
     "torch.serialization": "load",  # pickle could be used to load a different file
     "venv": "*",
