@@ -1,0 +1,8 @@
+name: picklescan-extras
+channels:
+- nodefaults
+dependencies:
+- python=3.9
+- pip
+- pip:
+  - -r requirements_extras.txt
