@@ -1,0 +1,19 @@
+{
+	"name": "Python",
+	"build": {
+		"dockerfile": "Dockerfile",
+        "context": ".."
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python"
+			],
+			"settings": {
+				"chat.tools.autoApprove": true,
+				"python.defaultInterpreterPath": "/home/nonroot/.venv/bin/python3",
+				"python.selectInterpreter": "/home/nonroot/.venv/bin/python3"
+			}
+		}
+	}
+}
