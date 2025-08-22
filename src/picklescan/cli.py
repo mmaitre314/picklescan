@@ -28,25 +28,17 @@ def main():
     _log.setLevel(logging.INFO)
     _log.addHandler(logging.StreamHandler(stream=sys.stdout))
 
-    parser = argparse.ArgumentParser(
-        description="Security scanner detecting Python Pickle files performing suspicious actions."
-    )
+    parser = argparse.ArgumentParser(description="Security scanner detecting Python Pickle files performing suspicious actions.")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "-p", "--path", help="Path to the file or folder to scan", dest="path"
-    )
-    group.add_argument(
-        "-u", "--url", help="URL to the file or folder to scan", dest="url"
-    )
+    group.add_argument("-p", "--path", help="Path to the file or folder to scan", dest="path")
+    group.add_argument("-u", "--url", help="URL to the file or folder to scan", dest="url")
     group.add_argument(
         "-hf",
         "--huggingface",
         help="Name of the Hugging Face model to scan",
         dest="huggingface_model",
     )
-    parser.add_argument(
-        "-g", "--globals", help="list all globals found", action="store_true"
-    )
+    parser.add_argument("-g", "--globals", help="list all globals found", action="store_true")
     parser.set_defaults(globals=False)
     parser.add_argument(
         "-l",
@@ -75,9 +67,7 @@ def main():
         elif args.huggingface_model is not None:
             scan_result = scan_huggingface_model(args.huggingface_model)
         else:
-            raise ValueError(
-                "Command line must include either a path, a URL, or a Hugging Face model"
-            )
+            raise ValueError("Command line must include either a path, a URL, or a Hugging Face model")
 
         print_summary(args.globals, scan_result)
 

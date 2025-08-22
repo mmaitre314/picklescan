@@ -5,5 +5,5 @@ pytest-cov==3.0.0
 requests==2.31.0
 aiohttp==3.9.1
 black==22.8.0
-numpy>1.24.0
+numpy>1.24.0,<2.0.0
 py7zr==0.22.0

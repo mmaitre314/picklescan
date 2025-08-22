@@ -19,6 +19,7 @@ import timeit
 import venv
 import zipfile
 from functools import partial
+from typing import Callable, Any, Union
 from unittest import TestCase
 
 from picklescan.cli import main
@@ -38,14 +39,6 @@ from picklescan.scanner import (
     scan_pytorch,
 )
 
-try:
-    import torch
-    import torch._inductor.codecache as codecache
-except ImportError:
-    # If PyTorch test files need to be regenerated, run 'pip install torch==2.6.0' first
-    torch = None
-    codecache = None
-
 _root_path = os.path.dirname(__file__)
 
 
@@ -64,9 +57,7 @@ class Malicious3:
         return http.client.HTTPSConnection, ("github.com",)
 
 
-malicious3_pickle_bytes = pickle.dumps(
-    Malicious3(), protocol=0
-)  # Malicious3 needs to be pickled before HTTPSConnection is mocked below
+malicious3_pickle_bytes = pickle.dumps(Malicious3(), protocol=0)  # Malicious3 needs to be pickled before HTTPSConnection is mocked below
 
 
 class Malicious4:
@@ -132,6 +123,8 @@ class Malicious16:
 
 class Malicious17:
     def __reduce__(self):
+        import torch._inductor.codecache as codecache
+
         return codecache.compile_file, ("", "", ["sh", "-c", '$(echo "pwned")'])
 
 
@@ -146,6 +139,8 @@ class Malicious19:
         self.kwargs = kwargs
 
     def __reduce__(self):
+        import torch
+
         return partial(torch.load, self.path, **self.kwargs), ()
 
 
@@ -167,6 +162,68 @@ class Malicious22:
         from numpy.testing._private.utils import runstring
 
         return runstring, ("import os; os.system('curl https://example.invalid')", {})
+
+
+def reduce_GHSA_4r9r_ch6f_vxmx():
+    import torch.utils.bottleneck.__main__ as bottleneck_main
+
+    return bottleneck_main.run_cprofile, ("__import__('os').system('whoami')", {})
+
+
+def reduce_GHSA_86cj_95qr_2p4f():
+    import torch._dynamo.guards as guards
+
+    return guards.GuardBuilder.get, (
+        {},
+        "__import__('os').system('whoami')",
+    )
+
+
+def reduce_GHSA_f4x7_rfwp_v3xw():
+    import torch.fx.experimental.symbolic_shapes as symbolic_shapes
+
+    return symbolic_shapes.ShapeEnv.evaluate_guards_expression, (
+        {},
+        "__import__('os').system('whoami')",
+        [],
+    )
+
+
+def reduce_GHSA_f745_w6jp_hpxx():
+    import torch.utils.collect_env as collect_env
+
+    return collect_env.run, ("__import__('os').system('whoami')",)
+
+
+def reduce_GHSA_jhph_76pp_mggw():
+    import torch.utils.collect_env as collect_env
+
+    return collect_env.run_and_read_all, (
+        collect_env.run,
+        "__import__('os').system('whoami')",
+    )
+
+
+def reduce_GHSA_h3qp_7fh3_f8h4():
+    import torch.utils.data.datapipes.utils.decoder as decoder
+
+    return decoder.basichandlers, ("pickle", b"")
+
+
+def reduce_GHSA_vr7h_p6mm_wpmh():
+    import torch.jit.unsupported_tensor_ops as unsupported_tensor_ops
+
+    return unsupported_tensor_ops.execWrapper, (
+        "__import__('os').system('whoami')",
+        {},
+        {},
+    )
+
+
+def reduce_GHSA_vv6j_3g6g_2pvj():
+    from torch.utils._config_module import ConfigModule
+
+    return ConfigModule.load_config, ({}, b"")
 
 
 class HTTPResponse:
@@ -205,17 +262,9 @@ class MockHTTPSConnection:
             with zipfile.ZipFile(buffer, "w") as zip:
                 zip.writestr("data.pkl", pickle.dumps(Malicious1()))
             self.response = HTTPResponse(200, buffer.getbuffer())
-        elif (
-            target
-            == "GET https://huggingface.co/api/models/ykilcher/totally-harmless-model"
-        ):
-            self.response = HTTPResponse(
-                200, b'{"siblings": [{"rfilename": "pytorch_model.bin"}]}'
-            )
-        elif (
-            target
-            == "GET https://huggingface.co/ykilcher/totally-harmless-model/resolve/main/pytorch_model.bin"
-        ):
+        elif target == "GET https://huggingface.co/api/models/ykilcher/totally-harmless-model":
+            self.response = HTTPResponse(200, b'{"siblings": [{"rfilename": "pytorch_model.bin"}]}')
+        elif target == "GET https://huggingface.co/ykilcher/totally-harmless-model/resolve/main/pytorch_model.bin":
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, "w") as zip:
                 zip.writestr("archive/data.pkl", pickle.dumps(Malicious1()))
@@ -235,19 +284,32 @@ class MockHTTPSConnection:
 http.client.HTTPSConnection = MockHTTPSConnection
 
 
-def initialize_pickle_file(path, obj, version):
+def initialize_pickle_file(path: str, obj: Any, version: int):
     if not os.path.exists(path):
         with open(path, "wb") as file:
             pickle.dump(obj, file, protocol=version)
 
 
-def initialize_data_file(path, data):
+def initialize_pickle_file_from_reduce(filename: str, reduce: Callable[[], tuple], version: int):
+    path = f"{_root_path}/data2/{filename}"
+    if os.path.exists(path):
+        return
+
+    class Reduce:
+        def __reduce__(self):
+            return reduce()
+
+    with open(path, "wb") as file:
+        pickle.dump(Reduce(), file, protocol=version)
+
+
+def initialize_data_file(path: str, data: bytes):
     if not os.path.exists(path):
         with open(path, "wb") as file:
             file.write(data)
 
 
-def initialize_7z_file(archive_path, file_name):
+def initialize_7z_file(archive_path: str, file_name: str):
     file_path = f"{_root_path}/data/malicious1.pkl"
     with open(file_path, "wb") as f:
         pickle.dump(Malicious1(), f, protocol=4)
@@ -259,13 +321,13 @@ def initialize_7z_file(archive_path, file_name):
     pathlib.Path.unlink(pathlib.Path(file_path))
 
 
-def initialize_zip_file(path, file_name, data):
+def initialize_zip_file(path: str, file_name: str, data: bytes):
     if not os.path.exists(path):
         with zipfile.ZipFile(path, "w") as zip:
             zip.writestr(file_name, data)
 
 
-def initialize_corrupt_zip_file_central_directory(path, file_name, data):
+def initialize_corrupt_zip_file_central_directory(path: str, file_name: str, data: bytes):
     if not os.path.exists(path):
         with zipfile.ZipFile(path, "w") as zip:
             zip.writestr(file_name, data)
@@ -308,9 +370,7 @@ def initialize_numpy_files():
 
     path = f"{_root_path}/data2/int_arrays.npz"
     if not os.path.exists(path):
-        np.savez(
-            path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int)
-        )
+        np.savez(path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int))
 
     path = f"{_root_path}/data2/object_arrays_compressed.npz"
     if not os.path.exists(path):
@@ -322,9 +382,7 @@ def initialize_numpy_files():
 
     path = f"{_root_path}/data2/int_arrays_compressed.npz"
     if not os.path.exists(path):
-        np.savez_compressed(
-            path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int)
-        )
+        np.savez_compressed(path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int))
 
     path = f"{_root_path}/data2/dns_exfiltration.npy"
     if not os.path.exists(path):
@@ -354,15 +412,9 @@ def initialize_pickle_files():
     # - Pickle versions 0, 1, 2 have built-in functions under '__builtin__' while versions 3 and 4 have them under 'builtins'
     # - Pickle versions 0, 1, 2, 3 use 'GLOBAL' opcode while 4 uses 'STACK_GLOBAL' opcode
     for version in (0, 3, 4):
-        initialize_pickle_file(
-            f"{_root_path}/data/benign0_v{version}.pkl", ["a", "b", "c"], version
-        )
-        initialize_pickle_file(
-            f"{_root_path}/data/malicious1_v{version}.pkl", Malicious1(), version
-        )
-        initialize_pickle_file(
-            f"{_root_path}/data/malicious2_v{version}.pkl", Malicious2(), version
-        )
+        initialize_pickle_file(f"{_root_path}/data/benign0_v{version}.pkl", ["a", "b", "c"], version)
+        initialize_pickle_file(f"{_root_path}/data/malicious1_v{version}.pkl", Malicious1(), version)
+        initialize_pickle_file(f"{_root_path}/data/malicious2_v{version}.pkl", Malicious2(), version)
 
     # Malicious Pickle from https://sensepost.com/cms/resources/conferences/2011/sour_pickles/BH_US_11_Slaviero_Sour_Pickles.pdf
     initialize_data_file(
@@ -505,15 +557,9 @@ def initialize_pickle_files():
     initialize_pickle_file(f"{_root_path}/data/malicious7.pkl", Malicious6(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious8.pkl", Malicious7(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious9.pkl", Malicious8(), 4)
-    initialize_pickle_file(
-        f"{_root_path}/data/malicious13a.pkl", Malicious13(), 0
-    )  # pickle module serialized as cpickle
-    initialize_pickle_file(
-        f"{_root_path}/data/malicious13b.pkl", Malicious13(), 4
-    )  # pickle module serialized as _pickle
-    initialize_pickle_file(
-        f"{_root_path}/data/malicious14.pkl", Malicious14(), 4
-    )  # runpy
+    initialize_pickle_file(f"{_root_path}/data/malicious13a.pkl", Malicious13(), 0)  # pickle module serialized as cpickle
+    initialize_pickle_file(f"{_root_path}/data/malicious13b.pkl", Malicious13(), 4)  # pickle module serialized as _pickle
+    initialize_pickle_file(f"{_root_path}/data/malicious14.pkl", Malicious14(), 4)  # runpy
     initialize_pickle_file(f"{_root_path}/data/malicious15a.pkl", Malicious15(), 2)
     initialize_pickle_file(f"{_root_path}/data/malicious15b.pkl", Malicious15(), 4)
     initialize_pickle_file(f"{_root_path}/data/malicious16.pkl", Malicious16(), 0)
@@ -524,9 +570,7 @@ def initialize_pickle_files():
     # This exploit serializes kwargs and passes them into a torch.load call
     initialize_pickle_file(
         f"{_root_path}/data/malicious19.pkl",
-        Malicious19(
-            "some_other_model.bin", pickle_file="config.json", weights_only=False
-        ),
+        Malicious19("some_other_model.bin", pickle_file="config.json", weights_only=False),
         4,
     )
 
@@ -576,9 +620,35 @@ def initialize_pickle_files():
         ),
     )
 
+    initialize_pickle_file_from_reduce("GHSA-4r9r-ch6f-vxmx.pkl", reduce_GHSA_4r9r_ch6f_vxmx, 4)
+    initialize_pickle_file_from_reduce("GHSA-86cj-95qr-2p4f.pkl", reduce_GHSA_86cj_95qr_2p4f, 4)
+    initialize_pickle_file_from_reduce("GHSA-f4x7-rfwp-v3xw.pkl", reduce_GHSA_f4x7_rfwp_v3xw, 4)
+    initialize_pickle_file_from_reduce("GHSA-f745-w6jp-hpxx.pkl", reduce_GHSA_f745_w6jp_hpxx, 4)
+    initialize_pickle_file_from_reduce("GHSA-jhph-76pp-mggw.pkl", reduce_GHSA_jhph_76pp_mggw, 4)
+    initialize_pickle_file_from_reduce("GHSA-h3qp-7fh3-f8h4.pkl", reduce_GHSA_h3qp_7fh3_f8h4, 4)
+    initialize_pickle_file_from_reduce("GHSA-vr7h-p6mm-wpmh.pkl", reduce_GHSA_vr7h_p6mm_wpmh, 4)
+    initialize_pickle_file_from_reduce("GHSA-vv6j-3g6g-2pvj.pkl", reduce_GHSA_vv6j_3g6g_2pvj, 4)
+
 
 initialize_pickle_files()
 initialize_numpy_files()
+
+
+def assert_scan(
+    filename: str,
+    globals: list[Global],
+    issues_count: Union[int, None] = None,
+    infected_files: int = 1,
+):
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/{filename}"),
+        ScanResult(
+            globals=globals,
+            scanned_files=1,
+            issues_count=issues_count if issues_count is not None else sum(g.safety == SafetyLevel.Dangerous for g in globals),
+            infected_files=infected_files,
+        ),
+    )
 
 
 def compare_scan_results(sr1: ScanResult, sr2: ScanResult):
@@ -597,15 +667,13 @@ def test_http_get():
 
 
 def test_list_globals():
-    assert _list_globals(io.BytesIO(pickle.dumps(Malicious1()))) == {
-        ("builtins", "eval")
-    }
+    assert _list_globals(io.BytesIO(pickle.dumps(Malicious1()))) == {("builtins", "eval")}
 
 
 def test_scan_pickle_bytes():
-    assert scan_pickle_bytes(
-        io.BytesIO(pickle.dumps(Malicious1())), "file.pkl"
-    ) == ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
+    assert scan_pickle_bytes(io.BytesIO(pickle.dumps(Malicious1())), "file.pkl") == ScanResult(
+        [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
+    )
 
 
 def test_scan_zip_bytes():
@@ -624,9 +692,7 @@ def test_scan_numpy():
             scan_numpy(io.BytesIO(f.read()), "object_array.npy"),
             ScanResult(
                 [
-                    Global(
-                        "numpy.core.multiarray", "_reconstruct", SafetyLevel.Innocuous
-                    ),
+                    Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Innocuous),
                     Global("numpy", "ndarray", SafetyLevel.Innocuous),
                     Global("numpy", "dtype", SafetyLevel.Innocuous),
                 ],
@@ -675,13 +741,9 @@ def test_scan_pytorch():
         0,
     )
     with open(f"{_root_path}/data/pytorch_model.bin", "rb") as f:
-        compare_scan_results(
-            scan_pytorch(io.BytesIO(f.read()), "pytorch_model.bin"), scan_result
-        )
+        compare_scan_results(scan_pytorch(io.BytesIO(f.read()), "pytorch_model.bin"), scan_result)
     with open(f"{_root_path}/data/new_pytorch_model.bin", "rb") as f:
-        compare_scan_results(
-            scan_pytorch(io.BytesIO(f.read()), "pytorch_model.bin"), scan_result
-        )
+        compare_scan_results(scan_pytorch(io.BytesIO(f.read()), "pytorch_model.bin"), scan_result)
 
 
 def test_scan_file_path():
@@ -698,9 +760,7 @@ def test_scan_file_path():
         0,
         0,
     )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/pytorch_model.bin"), pytorch
-    )
+    compare_scan_results(scan_file_path(f"{_root_path}/data/pytorch_model.bin"), pytorch)
 
     malicious0 = ScanResult(
         [
@@ -715,123 +775,59 @@ def test_scan_file_path():
         4,
         1,
     )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious0.pkl"), malicious0
-    )
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious0.pkl"), malicious0)
 
-    malicious1_v0 = ScanResult(
-        [Global("__builtin__", "eval", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1_v0.pkl"), malicious1_v0
-    )
+    malicious1_v0 = ScanResult([Global("__builtin__", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_v0.pkl"), malicious1_v0)
 
-    malicious1 = ScanResult(
-        [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1_v3.pkl"), malicious1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1_v4.pkl"), malicious1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1.zip"), malicious1
-    )
+    malicious1 = ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_v3.pkl"), malicious1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_v4.pkl"), malicious1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1.zip"), malicious1)
     compare_scan_results(
         scan_file_path(f"{_root_path}/data/malicious1_central_directory.zip"),
         malicious1,
     )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1_0x1.zip"), malicious1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1_0x20.zip"), malicious1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1_0x40.zip"), malicious1
-    )
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_0x1.zip"), malicious1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_0x20.zip"), malicious1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_0x40.zip"), malicious1)
     compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1.7z"), malicious1)
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious1_wrong_ext.zip"), malicious1
-    )
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious1_wrong_ext.zip"), malicious1)
 
     malicious2 = ScanResult([Global("posix", "system", SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious2_v0.pkl"), malicious2
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious2_v3.pkl"), malicious2
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious2_v4.pkl"), malicious2
-    )
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious2_v0.pkl"), malicious2)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious2_v3.pkl"), malicious2)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious2_v4.pkl"), malicious2)
 
-    malicious3 = ScanResult(
-        [Global("httplib", "HTTPSConnection", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious3.pkl"), malicious3
-    )
+    malicious3 = ScanResult([Global("httplib", "HTTPSConnection", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious3.pkl"), malicious3)
 
-    malicious4 = ScanResult(
-        [Global("requests.api", "get", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious4.pickle"), malicious4
-    )
+    malicious4 = ScanResult([Global("requests.api", "get", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious4.pickle"), malicious4)
 
-    malicious5 = ScanResult(
-        [Global("aiohttp.client", "ClientSession", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious5.pickle"), malicious5
-    )
+    malicious5 = ScanResult([Global("aiohttp.client", "ClientSession", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious5.pickle"), malicious5)
 
-    malicious6 = ScanResult(
-        [Global("requests.api", "get", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious6.pkl"), malicious6
-    )
+    malicious6 = ScanResult([Global("requests.api", "get", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious6.pkl"), malicious6)
 
-    malicious7 = ScanResult(
-        [Global("socket", "create_connection", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious7.pkl"), malicious7
-    )
+    malicious7 = ScanResult([Global("socket", "create_connection", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious7.pkl"), malicious7)
 
-    malicious8 = ScanResult(
-        [Global("subprocess", "run", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious8.pkl"), malicious8
-    )
+    malicious8 = ScanResult([Global("subprocess", "run", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious8.pkl"), malicious8)
 
     malicious9 = ScanResult([Global("sys", "exit", SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious9.pkl"), malicious9
-    )
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious9.pkl"), malicious9)
 
-    malicious10 = ScanResult(
-        [Global("__builtin__", "exec", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious10.pkl"), malicious10
-    )
+    malicious10 = ScanResult([Global("__builtin__", "exec", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious10.pkl"), malicious10)
 
     bad_pytorch = ScanResult([], 0, 0, 0, True)
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/bad_pytorch.pt"), bad_pytorch
-    )
+    compare_scan_results(scan_file_path(f"{_root_path}/data/bad_pytorch.pt"), bad_pytorch)
 
-    malicious14 = ScanResult(
-        [Global("runpy", "_run_code", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_file_path(f"{_root_path}/data/malicious14.pkl"), malicious14
-    )
+    malicious14 = ScanResult([Global("runpy", "_run_code", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_file_path(f"{_root_path}/data/malicious14.pkl"), malicious14)
 
     compare_scan_results(
         scan_file_path(f"{_root_path}/data2/malicious21.pkl"),
@@ -849,9 +845,7 @@ def test_scan_file_path():
         scan_file_path(f"{_root_path}/data2/malicious22.pkl"),
         ScanResult(
             [
-                Global(
-                    "numpy.testing._private.utils", "runstring", SafetyLevel.Dangerous
-                ),
+                Global("numpy.testing._private.utils", "runstring", SafetyLevel.Dangerous),
             ],
             scanned_files=1,
             issues_count=1,
@@ -870,6 +864,27 @@ def test_scan_file_path():
             infected_files=1,
         ),
     )
+
+    assert_scan(
+        "GHSA-4r9r-ch6f-vxmx.pkl",
+        [Global("torch.utils.bottleneck.__main__", "run_cprofile", SafetyLevel.Dangerous)],
+    )
+    assert_scan("GHSA-86cj-95qr-2p4f.pkl", [Global("torch._dynamo.guards", "GuardBuilder.get", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-f4x7-rfwp-v3xw.pkl",
+        [Global("torch.fx.experimental.symbolic_shapes", "ShapeEnv.evaluate_guards_expression", SafetyLevel.Dangerous)],
+    )
+    assert_scan("GHSA-f745-w6jp-hpxx.pkl", [Global("torch.utils.collect_env", "run", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-jhph-76pp-mggw.pkl",
+        [
+            Global("torch.utils.collect_env", "run", SafetyLevel.Dangerous),
+            Global("torch.utils.collect_env", "run_and_read_all", SafetyLevel.Suspicious),
+        ],
+    )
+    assert_scan("GHSA-h3qp-7fh3-f8h4.pkl", [Global("torch.utils.data.datapipes.utils.decoder", "basichandlers", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-vr7h-p6mm-wpmh.pkl", [Global("torch.jit.unsupported_tensor_ops", "execWrapper", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-vv6j-3g6g-2pvj.pkl", [Global("torch.utils._config_module", "ConfigModule.load_config", SafetyLevel.Dangerous)])
 
 
 def test_scan_file_path_npz():
@@ -998,19 +1013,13 @@ def test_scan_url():
     malicious = ScanResult([Global(os.name, "system", SafetyLevel.Dangerous)], 1, 1, 1)
     compare_scan_results(scan_url("https://localhost/mock/pickle/malicious"), malicious)
 
-    malicious_zip = ScanResult(
-        [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
-    )
-    compare_scan_results(
-        scan_url("https://localhost/mock/zip/malicious"), malicious_zip
-    )
+    malicious_zip = ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
+    compare_scan_results(scan_url("https://localhost/mock/zip/malicious"), malicious_zip)
 
 
 def test_scan_huggingface_model():
     eval_sr = ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
-    compare_scan_results(
-        scan_huggingface_model("ykilcher/totally-harmless-model"), eval_sr
-    )
+    compare_scan_results(scan_huggingface_model("ykilcher/totally-harmless-model"), eval_sr)
 
 
 def test_main():
@@ -1031,9 +1040,7 @@ def test_pickle_files():
 
 
 def test_invalid_bytes_err():
-    malicious_invalid_bytes = ScanResult(
-        [Global("os", "system", SafetyLevel.Dangerous)], 1, 1, 1, True
-    )
+    malicious_invalid_bytes = ScanResult([Global("os", "system", SafetyLevel.Dangerous)], 1, 1, 1, True)
     with open(f"{_root_path}/data/malicious-invalid-bytes.pkl", "rb") as file:
         compare_scan_results(
             scan_pickle_bytes(file, f"{_root_path}/data/malicious-invalid-bytes.pkl"),

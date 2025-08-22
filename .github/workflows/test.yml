@@ -23,7 +23,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install -e '.[7z]'
       - name: Check code format
-        run: black --check src tests
+        run: python -m black src tests --check --line-length 140
       - name: Lint with flake8
         run: python -m flake8 . --count --show-source --statistics
       - name: Test with pytest

@@ -140,8 +140,19 @@ _unsafe_globals = {
     "pip": "*",
     "pydoc": "pipepager",  # pydoc.pipepager('help','echo pwned')
     "timeit": "*",
+    "torch._dynamo.guards": {"GuardBuilder.get"},
     "torch._inductor.codecache": "compile_file",  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
+    "torch.fx.experimental.symbolic_shapes": {"ShapeEnv.evaluate_guards_expression"},
+    "torch.jit.unsupported_tensor_ops": {"execWrapper"},
     "torch.serialization": "load",  # pickle could be used to load a different file
+    "torch.utils._config_module": {
+        "ConfigModule.load_config"
+    },  # allows storing a pickle inside a pickle (if this has valid use cases, scan the input bytes instead of flagging the global)
+    "torch.utils.bottleneck.__main__": {"run_cprofile"},
+    "torch.utils.collect_env": {"run"},
+    "torch.utils.data.datapipes.utils.decoder": {
+        "basichandlers"
+    },  # allows storing a pickle inside a pickle (if this has valid use cases, scan the input bytes instead of flagging the global)
     "venv": "*",
     "webbrowser": "*",  # Includes webbrowser.open()
 }
@@ -200,9 +211,7 @@ def _http_get(url) -> bytes:
     _log.debug(f"Request: GET {url}")
 
     parsed_url = urllib.parse.urlparse(url)
-    path_and_query = parsed_url.path + (
-        "?" + parsed_url.query if len(parsed_url.query) > 0 else ""
-    )
+    path_and_query = parsed_url.path + ("?" + parsed_url.query if len(parsed_url.query) > 0 else "")
 
     conn = http.client.HTTPSConnection(parsed_url.netloc)
     try:
@@ -271,18 +280,14 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                         "BINSTRING",
                         "SHORT_BINSTRING",
                     ]:
-                        _log.debug(
-                            "Presence of non-string opcode, categorizing as an unknown dangerous import"
-                        )
+                        _log.debug("Presence of non-string opcode, categorizing as an unknown dangerous import")
                         values.append("unknown")
                     else:
                         values.append(ops[n - offset][1])
                     if len(values) == 2:
                         break
                 if len(values) != 2:
-                    raise ValueError(
-                        f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2."
-                    )
+                    raise ValueError(f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2.")
                 globals.add((values[1], values[0]))
 
         if not multiple_pickles:
@@ -312,17 +317,11 @@ def _build_scan_result_from_raw_globals(
         unsafe_filter = _unsafe_globals.get(g.module)
         if "unknown" in g.module or "unknown" in g.name:
             g.safety = SafetyLevel.Dangerous
-            _log.warning(
-                "%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name
-            )
+            _log.warning("%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name)
             issues_count += 1
-        elif unsafe_filter is not None and (
-            unsafe_filter == "*" or g.name in unsafe_filter
-        ):
+        elif unsafe_filter is not None and (unsafe_filter == "*" or g.name in unsafe_filter):
             g.safety = SafetyLevel.Dangerous
-            _log.warning(
-                "%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name
-            )
+            _log.warning("%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name)
             issues_count += 1
         elif safe_filter is not None and (safe_filter == "*" or g.name in safe_filter):
             g.safety = SafetyLevel.Innocuous
@@ -341,9 +340,7 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanRe
     except GenOpsError as e:
         _log.error(f"ERROR: parsing pickle in {file_id}: {e}")
         if e.globals is not None:
-            return _build_scan_result_from_raw_globals(
-                e.globals, file_id, scan_err=True
-            )
+            return _build_scan_result_from_raw_globals(e.globals, file_id, scan_err=True)
         else:
             return ScanResult([], scan_err=True)
 
@@ -357,9 +354,7 @@ def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
     try:
         import py7zr
     except ImportError:
-        raise Exception(
-            "py7zr is required to scan 7z archives, install picklescan using: 'pip install picklescan[7z]'"
-        )
+        raise Exception("py7zr is required to scan 7z archives, install picklescan using: 'pip install picklescan[7z]'")
     result = ScanResult([])
 
     with py7zr.SevenZipFile(data, mode="r") as archive:
@@ -389,24 +384,18 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
                     magic_bytes = file.read(8)
                 file_ext = os.path.splitext(file_name)[1]
 
-                if file_ext in _pickle_file_extensions or any(
-                    magic_bytes.startswith(mn) for mn in _pickle_magic_bytes
-                ):
+                if file_ext in _pickle_file_extensions or any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
                     _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                     with zip.open(file_name, "r") as file:
                         result.merge(scan_pickle_bytes(file, f"{file_id}:{file_name}"))
 
-                elif file_ext in _numpy_file_extensions or magic_bytes.startswith(
-                    _numpy_magic_bytes
-                ):
+                elif file_ext in _numpy_file_extensions or magic_bytes.startswith(_numpy_magic_bytes):
                     _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                     with zip.open(file_name, "r") as file:
                         result.merge(scan_numpy(file, f"{file_id}:{file_name}"))
             except (zipfile.BadZipFile, RuntimeError) as e:
                 # Log decompression issues (password protected, corrupted, etc.)
-                _log.warning(
-                    "Invalid file %s in zip archive %s: %s", file_name, file_id, str(e)
-                )
+                _log.warning("Invalid file %s in zip archive %s: %s", file_name, file_id, str(e))
 
     return result
 
@@ -491,24 +480,14 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> Scan
 
 def scan_huggingface_model(repo_id):
     # List model files
-    model = json.loads(
-        _http_get(f"https://huggingface.co/api/models/{repo_id}").decode("utf-8")
-    )
-    file_names = [
-        file_name
-        for file_name in (sibling.get("rfilename") for sibling in model["siblings"])
-        if file_name is not None
-    ]
+    model = json.loads(_http_get(f"https://huggingface.co/api/models/{repo_id}").decode("utf-8"))
+    file_names = [file_name for file_name in (sibling.get("rfilename") for sibling in model["siblings"]) if file_name is not None]
 
     # Scan model files
     scan_result = ScanResult([])
     for file_name in file_names:
         file_ext = os.path.splitext(file_name)[1]
-        if (
-            file_ext not in _zip_file_extensions
-            and file_ext not in _pickle_file_extensions
-            and file_ext not in _pytorch_file_extensions
-        ):
+        if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions and file_ext not in _pytorch_file_extensions:
             continue
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
         url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"

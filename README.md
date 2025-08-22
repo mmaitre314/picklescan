@@ -85,7 +85,7 @@ picklescan -l DEBUG -u https://huggingface.co/prajjwal1/bert-tiny/resolve/main/p
 
 Lint the code:
 ```
-black src tests
+black src tests --line-length 140
 flake8 src tests --count --show-source
 ```
 
