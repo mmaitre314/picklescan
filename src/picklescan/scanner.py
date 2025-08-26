@@ -134,11 +134,18 @@ _unsafe_globals = {
     "ssl": "*",  # DNS exfiltration via ssl.get_server_certificate()
     "subprocess": "*",
     "sys": "*",
+    "asyncio.unix_events": {"_UnixSubprocessTransport._start"},
     "code": {"InteractiveInterpreter.runcode"},
+    "cProfile": {"runctx", "run"},
+    "doctest": {"debug_script"},
+    "ensurepip": {"_run_pip"},
     "idlelib.autocomplete": {"AutoComplete.get_entity", "AutoComplete.fetch_completions"},
     "idlelib.calltip": {"Calltip.fetch_tip", "get_entity"},
     "idlelib.debugobj": {"ObjectTreeItem.SetText"},
+    "idlelib.pyshell": {"ModifiedInterpreter.runcode", "ModifiedInterpreter.runcommand"},
+    "idlelib.run": {"Executive.runcode"},
     "lib2to3.pgen2.grammar": {"Grammar.loads"},
+    "lib2to3.pgen2.pgen": {"ParserGenerator.make_label"},
     "pdb": "*",
     "pickle": "*",
     "_pickle": "*",
@@ -154,7 +161,7 @@ _unsafe_globals = {
     "torch.utils._config_module": {
         "ConfigModule.load_config"
     },  # allows storing a pickle inside a pickle (if this has valid use cases, scan the input bytes instead of flagging the global)
-    "torch.utils.bottleneck.__main__": {"run_cprofile"},
+    "torch.utils.bottleneck.__main__": {"run_cprofile", "run_autograd_prof"},
     "torch.utils.collect_env": {"run"},
     "torch.utils.data.datapipes.utils.decoder": {
         "basichandlers"
