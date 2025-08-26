@@ -18,7 +18,13 @@ import sys
 import timeit
 import venv
 import zipfile
+from code import InteractiveInterpreter
 from functools import partial
+from idlelib.autocomplete import AutoComplete, ATTRS
+from idlelib.calltip import Calltip, get_entity
+from idlelib.debugobj import ObjectTreeItem
+from profile import Profile
+from trace import Trace
 from typing import Callable, Any, Union
 from unittest import TestCase
 
@@ -164,44 +170,37 @@ class Malicious22:
         return runstring, ("import os; os.system('curl https://example.invalid')", {})
 
 
+_payload = "__import__('os').system('whoami')"
+
+
 def reduce_GHSA_4r9r_ch6f_vxmx():
     import torch.utils.bottleneck.__main__ as bottleneck_main
 
-    return bottleneck_main.run_cprofile, ("__import__('os').system('whoami')", {})
+    return bottleneck_main.run_cprofile, (_payload, {})
 
 
 def reduce_GHSA_86cj_95qr_2p4f():
     import torch._dynamo.guards as guards
 
-    return guards.GuardBuilder.get, (
-        {},
-        "__import__('os').system('whoami')",
-    )
+    return guards.GuardBuilder.get, ({}, _payload)
 
 
 def reduce_GHSA_f4x7_rfwp_v3xw():
     import torch.fx.experimental.symbolic_shapes as symbolic_shapes
 
-    return symbolic_shapes.ShapeEnv.evaluate_guards_expression, (
-        {},
-        "__import__('os').system('whoami')",
-        [],
-    )
+    return symbolic_shapes.ShapeEnv.evaluate_guards_expression, ({}, _payload, [])
 
 
 def reduce_GHSA_f745_w6jp_hpxx():
     import torch.utils.collect_env as collect_env
 
-    return collect_env.run, ("__import__('os').system('whoami')",)
+    return collect_env.run, (_payload,)
 
 
 def reduce_GHSA_jhph_76pp_mggw():
     import torch.utils.collect_env as collect_env
 
-    return collect_env.run_and_read_all, (
-        collect_env.run,
-        "__import__('os').system('whoami')",
-    )
+    return collect_env.run_and_read_all, (collect_env.run, _payload)
 
 
 def reduce_GHSA_h3qp_7fh3_f8h4():
@@ -213,17 +212,59 @@ def reduce_GHSA_h3qp_7fh3_f8h4():
 def reduce_GHSA_vr7h_p6mm_wpmh():
     import torch.jit.unsupported_tensor_ops as unsupported_tensor_ops
 
-    return unsupported_tensor_ops.execWrapper, (
-        "__import__('os').system('whoami')",
-        {},
-        {},
-    )
+    return unsupported_tensor_ops.execWrapper, (_payload, {}, {})
 
 
 def reduce_GHSA_vv6j_3g6g_2pvj():
     from torch.utils._config_module import ConfigModule
 
     return ConfigModule.load_config, ({}, b"")
+
+
+def reduce_GHSA_5qwp_399c_mjwf():
+    return Trace.run, ({}, _payload)
+
+
+def reduce_GHSA_g344_hcph_8vgg():
+    return Trace.runctx, ({}, _payload, {}, {})
+
+
+def reduce_GHSA_x696_vm39_cp64():
+    return Profile.run, ({}, _payload)
+
+
+def reduce_GHSA_6vqj_c2q5_j97w():
+    return Profile.runctx, ({}, _payload, {}, {})
+
+
+def reduce_GHSA_f54q_57x4_jg88():
+    from lib2to3.pgen2.grammar import Grammar
+
+    return Grammar.loads, ({}, b"")
+
+
+def reduce_GHSA_3vg9_h568_4w9m():
+    return ObjectTreeItem.SetText, ({}, _payload)
+
+
+def reduce_GHSA_6w4w_5w54_rjvr():
+    return AutoComplete.get_entity, ({}, _payload)
+
+
+def reduce_GHSA_7cq8_mj8x_j263():
+    return AutoComplete.fetch_completions, ({}, _payload, ATTRS)
+
+
+def reduce_GHSA_cj3c_v495_4xqh():
+    return InteractiveInterpreter.runcode, ({}, _payload)
+
+
+def reduce_GHSA_8r4j_24qv_fmq9():
+    return Calltip.fetch_tip, ({}, _payload)
+
+
+def reduce_GHSA_9xph_j2h6_g47v():
+    return get_entity, (_payload,)
 
 
 class HTTPResponse:
@@ -290,7 +331,7 @@ def initialize_pickle_file(path: str, obj: Any, version: int):
             pickle.dump(obj, file, protocol=version)
 
 
-def initialize_pickle_file_from_reduce(filename: str, reduce: Callable[[], tuple], version: int):
+def initialize_pickle_file_from_reduce(filename: str, reduce: Callable[[], tuple], version: int = 4):
     path = f"{_root_path}/data2/{filename}"
     if os.path.exists(path):
         return
@@ -620,14 +661,25 @@ def initialize_pickle_files():
         ),
     )
 
-    initialize_pickle_file_from_reduce("GHSA-4r9r-ch6f-vxmx.pkl", reduce_GHSA_4r9r_ch6f_vxmx, 4)
-    initialize_pickle_file_from_reduce("GHSA-86cj-95qr-2p4f.pkl", reduce_GHSA_86cj_95qr_2p4f, 4)
-    initialize_pickle_file_from_reduce("GHSA-f4x7-rfwp-v3xw.pkl", reduce_GHSA_f4x7_rfwp_v3xw, 4)
-    initialize_pickle_file_from_reduce("GHSA-f745-w6jp-hpxx.pkl", reduce_GHSA_f745_w6jp_hpxx, 4)
-    initialize_pickle_file_from_reduce("GHSA-jhph-76pp-mggw.pkl", reduce_GHSA_jhph_76pp_mggw, 4)
-    initialize_pickle_file_from_reduce("GHSA-h3qp-7fh3-f8h4.pkl", reduce_GHSA_h3qp_7fh3_f8h4, 4)
-    initialize_pickle_file_from_reduce("GHSA-vr7h-p6mm-wpmh.pkl", reduce_GHSA_vr7h_p6mm_wpmh, 4)
-    initialize_pickle_file_from_reduce("GHSA-vv6j-3g6g-2pvj.pkl", reduce_GHSA_vv6j_3g6g_2pvj, 4)
+    initialize_pickle_file_from_reduce("GHSA-4r9r-ch6f-vxmx.pkl", reduce_GHSA_4r9r_ch6f_vxmx)
+    initialize_pickle_file_from_reduce("GHSA-86cj-95qr-2p4f.pkl", reduce_GHSA_86cj_95qr_2p4f)
+    initialize_pickle_file_from_reduce("GHSA-f4x7-rfwp-v3xw.pkl", reduce_GHSA_f4x7_rfwp_v3xw)
+    initialize_pickle_file_from_reduce("GHSA-f745-w6jp-hpxx.pkl", reduce_GHSA_f745_w6jp_hpxx)
+    initialize_pickle_file_from_reduce("GHSA-jhph-76pp-mggw.pkl", reduce_GHSA_jhph_76pp_mggw)
+    initialize_pickle_file_from_reduce("GHSA-h3qp-7fh3-f8h4.pkl", reduce_GHSA_h3qp_7fh3_f8h4)
+    initialize_pickle_file_from_reduce("GHSA-vr7h-p6mm-wpmh.pkl", reduce_GHSA_vr7h_p6mm_wpmh)
+    initialize_pickle_file_from_reduce("GHSA-vv6j-3g6g-2pvj.pkl", reduce_GHSA_vv6j_3g6g_2pvj)
+    initialize_pickle_file_from_reduce("GHSA-5qwp-399c-mjwf.pkl", reduce_GHSA_5qwp_399c_mjwf)
+    initialize_pickle_file_from_reduce("GHSA-g344-hcph-8vgg.pkl", reduce_GHSA_g344_hcph_8vgg)
+    initialize_pickle_file_from_reduce("GHSA-x696-vm39-cp64.pkl", reduce_GHSA_x696_vm39_cp64)
+    initialize_pickle_file_from_reduce("GHSA-6vqj-c2q5-j97w.pkl", reduce_GHSA_6vqj_c2q5_j97w)
+    initialize_pickle_file_from_reduce("GHSA-f54q-57x4-jg88.pkl", reduce_GHSA_f54q_57x4_jg88)
+    initialize_pickle_file_from_reduce("GHSA-3vg9-h568-4w9m.pkl", reduce_GHSA_3vg9_h568_4w9m)
+    initialize_pickle_file_from_reduce("GHSA-6w4w-5w54-rjvr.pkl", reduce_GHSA_6w4w_5w54_rjvr)
+    initialize_pickle_file_from_reduce("GHSA-7cq8-mj8x-j263.pkl", reduce_GHSA_7cq8_mj8x_j263)
+    initialize_pickle_file_from_reduce("GHSA-cj3c-v495-4xqh.pkl", reduce_GHSA_cj3c_v495_4xqh)
+    initialize_pickle_file_from_reduce("GHSA-8r4j-24qv-fmq9.pkl", reduce_GHSA_8r4j_24qv_fmq9)
+    initialize_pickle_file_from_reduce("GHSA-9xph-j2h6-g47v.pkl", reduce_GHSA_9xph_j2h6_g47v)
 
 
 initialize_pickle_files()
@@ -885,6 +937,17 @@ def test_scan_file_path():
     assert_scan("GHSA-h3qp-7fh3-f8h4.pkl", [Global("torch.utils.data.datapipes.utils.decoder", "basichandlers", SafetyLevel.Dangerous)])
     assert_scan("GHSA-vr7h-p6mm-wpmh.pkl", [Global("torch.jit.unsupported_tensor_ops", "execWrapper", SafetyLevel.Dangerous)])
     assert_scan("GHSA-vv6j-3g6g-2pvj.pkl", [Global("torch.utils._config_module", "ConfigModule.load_config", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-5qwp-399c-mjwf.pkl", [Global("trace", "Trace.run", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-g344-hcph-8vgg.pkl", [Global("trace", "Trace.runctx", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-x696-vm39-cp64.pkl", [Global("profile", "Profile.run", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-6vqj-c2q5-j97w.pkl", [Global("profile", "Profile.runctx", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-f54q-57x4-jg88.pkl", [Global("lib2to3.pgen2.grammar", "Grammar.loads", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-3vg9-h568-4w9m.pkl", [Global("idlelib.debugobj", "ObjectTreeItem.SetText", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-6w4w-5w54-rjvr.pkl", [Global("idlelib.autocomplete", "AutoComplete.get_entity", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-7cq8-mj8x-j263.pkl", [Global("idlelib.autocomplete", "AutoComplete.fetch_completions", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-cj3c-v495-4xqh.pkl", [Global("code", "InteractiveInterpreter.runcode", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-8r4j-24qv-fmq9.pkl", [Global("idlelib.calltip", "Calltip.fetch_tip", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-9xph-j2h6-g47v.pkl", [Global("idlelib.calltip", "get_entity", SafetyLevel.Dangerous)])
 
 
 def test_scan_file_path_npz():
