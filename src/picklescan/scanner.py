@@ -134,10 +134,16 @@ _unsafe_globals = {
     "ssl": "*",  # DNS exfiltration via ssl.get_server_certificate()
     "subprocess": "*",
     "sys": "*",
+    "code": {"InteractiveInterpreter.runcode"},
+    "idlelib.autocomplete": {"AutoComplete.get_entity", "AutoComplete.fetch_completions"},
+    "idlelib.calltip": {"Calltip.fetch_tip", "get_entity"},
+    "idlelib.debugobj": {"ObjectTreeItem.SetText"},
+    "lib2to3.pgen2.grammar": {"Grammar.loads"},
     "pdb": "*",
     "pickle": "*",
     "_pickle": "*",
     "pip": "*",
+    "profile": {"Profile.run", "Profile.runctx"},
     "pydoc": "pipepager",  # pydoc.pipepager('help','echo pwned')
     "timeit": "*",
     "torch._dynamo.guards": {"GuardBuilder.get"},
@@ -153,6 +159,7 @@ _unsafe_globals = {
     "torch.utils.data.datapipes.utils.decoder": {
         "basichandlers"
     },  # allows storing a pickle inside a pickle (if this has valid use cases, scan the input bytes instead of flagging the global)
+    "trace": {"Trace.run", "Trace.runctx"},
     "venv": "*",
     "webbrowser": "*",  # Includes webbrowser.open()
 }
