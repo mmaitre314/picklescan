@@ -256,6 +256,7 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
             for op in pickletools.genops(data):
                 ops.append(op)
         except Exception as e:
+            _log.debug(f"Error parsing pickle: {e}", exc_info=True)
             parsing_pkl_error = str(e)
         last_byte = data.read(1)
         data.seek(-1, 1)
@@ -352,11 +353,12 @@ def _build_scan_result_from_raw_globals(
 
 def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanResult:
     """Disassemble a Pickle stream and report issues"""
+    _log.debug(f"scan_pickle_bytes({file_id})")
 
     try:
         raw_globals = _list_globals(data, multiple_pickles)
     except GenOpsError as e:
-        _log.error(f"ERROR: parsing pickle in {file_id}: {e}")
+        _log.error(f"ERROR: parsing pickle in {file_id}: {e}", exc_info=_log.isEnabledFor(logging.DEBUG))
         if e.globals is not None:
             return _build_scan_result_from_raw_globals(e.globals, file_id, scan_err=True)
         else:
@@ -369,6 +371,8 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanRe
 
 # XXX: it appears there is not way to get the byte stream for a given file within the 7z archive and thus forcing us to unzip to disk before scanning
 def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
+    _log.debug(f"scan_7z_bytes({file_id})")
+
     try:
         import py7zr
     except ImportError:
@@ -391,6 +395,8 @@ def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
 
 
 def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
+    _log.debug(f"scan_zip_bytes({file_id})")
+
     result = ScanResult([])
 
     with RelaxedZipFile(data, "r") as zip:
@@ -419,6 +425,8 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
 
 
 def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
+    _log.debug(f"scan_numpy({file_id})")
+
     # Delay import to avoid dependency on NumPy
     import numpy as np
 
@@ -449,6 +457,8 @@ def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
 
 
 def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
+    _log.debug(f"scan_pytorch({file_id})")
+
     # new pytorch format
     if _is_zipfile(data):
         return scan_zip_bytes(data, file_id)
@@ -477,6 +487,8 @@ def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
 
 
 def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> ScanResult:
+    _log.debug(f"scan_bytes({file_id})")
+
     if file_ext is not None and file_ext in _pytorch_file_extensions:
         try:
             return scan_pytorch(data, file_id)
@@ -497,6 +509,8 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> Scan
 
 
 def scan_huggingface_model(repo_id):
+    _log.debug(f"scan_huggingface_model({repo_id})")
+
     # List model files
     model = json.loads(_http_get(f"https://huggingface.co/api/models/{repo_id}").decode("utf-8"))
     file_names = [file_name for file_name in (sibling.get("rfilename") for sibling in model["siblings"]) if file_name is not None]
@@ -516,6 +530,8 @@ def scan_huggingface_model(repo_id):
 
 
 def scan_directory_path(path) -> ScanResult:
+    _log.debug(f"scan_directory_path({path})")
+
     scan_result = ScanResult([])
 
     for base_path, _, file_names in os.walk(path):
@@ -536,10 +552,14 @@ def scan_directory_path(path) -> ScanResult:
 
 
 def scan_file_path(path) -> ScanResult:
+    _log.debug(f"scan_file_path({path})")
+
     file_ext = os.path.splitext(path)[1]
     with open(path, "rb") as file:
         return scan_bytes(file, path, file_ext)
 
 
 def scan_url(url) -> ScanResult:
+    _log.debug(f"scan_url({url})")
+
     return scan_bytes(io.BytesIO(_http_get(url)), url)

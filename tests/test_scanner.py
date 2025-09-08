@@ -438,6 +438,21 @@ def initialize_corrupt_zip_file_central_directory(path: str, file_name: str, dat
             f.write(modified_data)
 
 
+def initialize_corrupt_zip_file_crc(path: str, file_name: str, data: bytes):
+    if not os.path.exists(path):
+        with io.BytesIO() as buffer:
+            with zipfile.ZipFile(buffer, "w") as zip:
+                zip.writestr(file_name, data)
+            data = buffer.getbuffer().tobytes()
+
+        # Corrupt the data, leading to a CRC mismatch
+        modified_data = data.replace(b"print('456')", b"print('123')", 1)
+
+        # Write the corrupted content
+        with open(path, "wb") as f:
+            f.write(modified_data)
+
+
 def initialize_numpy_files():
     import numpy as np
 
@@ -683,6 +698,12 @@ def initialize_pickle_files():
 
     initialize_corrupt_zip_file_central_directory(
         f"{_root_path}/data/malicious1_central_directory.zip",
+        "data.pkl",
+        pickle.dumps(Malicious1(), protocol=4),
+    )
+
+    initialize_corrupt_zip_file_crc(
+        f"{_root_path}/data2/malicious1_crc.zip",
         "data.pkl",
         pickle.dumps(Malicious1(), protocol=4),
     )
@@ -1022,6 +1043,7 @@ def test_scan_file_path():
     assert_scan("GHSA-9w88-8rmg-7g2p.pkl", [Global("cProfile", "runctx", SafetyLevel.Dangerous)])
     assert_scan("GHSA-49gj-c84q-6qm9.pkl", [Global("cProfile", "run", SafetyLevel.Dangerous)])
     assert_scan("GHSA-q77w-mwjj-7mqx.pkl", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
+    assert_scan("malicious1_crc.zip", [Global("builtins", name="eval", safety=SafetyLevel.Dangerous)])
 
 
 def test_scan_file_path_npz():

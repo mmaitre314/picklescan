@@ -1,7 +1,7 @@
 # A more forgiving implementation of zipfile.ZipFile
 # Modified from Python code at
 # https://github.com/python/cpython/blob/edb69578ed74ff04ab78ab953355faa343a7e0ee/Lib/zipfile/__init__.py#L1606
-# Changes: removed flag/password/filename checks to align better with PyTorch's zip decoding
+# Changes: removed flag/password/filename/CRC checks to align better with PyTorch's zip decoding
 
 import struct
 import zipfile
@@ -85,7 +85,12 @@ class RelaxedZipFile(zipfile.ZipFile):
             if fheader[_FH_EXTRA_FIELD_LENGTH]:
                 zef_file.read(fheader[_FH_EXTRA_FIELD_LENGTH])
 
-            return zipfile.ZipExtFile(zef_file, mode, zinfo, pwd, True)
+            zef = zipfile.ZipExtFile(zef_file, mode, zinfo, pwd, True)
+
+            # Disable CRC validation as PyTorch may not use it
+            zef._expected_crc = None
+
+            return zef
         except BaseException:
             zef_file.close()
             raise
