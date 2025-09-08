@@ -493,19 +493,23 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> Scan
         try:
             return scan_pytorch(data, file_id)
         except InvalidMagicError as e:
-            _log.error(f"ERROR: Invalid magic number for file {e}")
-            return ScanResult([], scan_err=True)
-    elif file_ext is not None and file_ext in _numpy_file_extensions:
+            _log.warning(
+                f"WARNING: Invalid PyTorch magic number for file {e}. Trying to scan as non-PyTorch file.",
+                exc_info=_log.isEnabledFor(logging.DEBUG),
+            )
+            data.seek(0)
+
+    if file_ext is not None and file_ext in _numpy_file_extensions:
         return scan_numpy(data, file_id)
+
+    is_zip = zipfile.is_zipfile(data)
+    data.seek(0)
+    if is_zip:
+        return scan_zip_bytes(data, file_id)
+    elif _is_7z_file(data):
+        return scan_7z_bytes(data, file_id)
     else:
-        is_zip = zipfile.is_zipfile(data)
-        data.seek(0)
-        if is_zip:
-            return scan_zip_bytes(data, file_id)
-        elif _is_7z_file(data):
-            return scan_7z_bytes(data, file_id)
-        else:
-            return scan_pickle_bytes(data, file_id)
+        return scan_pickle_bytes(data, file_id)
 
 
 def scan_huggingface_model(repo_id):

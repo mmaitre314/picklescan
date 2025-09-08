@@ -765,6 +765,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-9w88-8rmg-7g2p.pkl", reduce_GHSA_9w88_8rmg_7g2p)
     initialize_pickle_file_from_reduce("GHSA-49gj-c84q-6qm9.pkl", reduce_GHSA_49gj_c84q_6qm9)
     initialize_pickle_file_from_reduce("GHSA-q77w-mwjj-7mqx.pkl", reduce_GHSA_q77w_mwjj_7mqx)
+    initialize_pickle_file_from_reduce("GHSA-jgw4-cr84-mqxg.bin", reduce_GHSA_q77w_mwjj_7mqx)
 
 
 initialize_pickle_files()
@@ -1043,6 +1044,7 @@ def test_scan_file_path():
     assert_scan("GHSA-9w88-8rmg-7g2p.pkl", [Global("cProfile", "runctx", SafetyLevel.Dangerous)])
     assert_scan("GHSA-49gj-c84q-6qm9.pkl", [Global("cProfile", "run", SafetyLevel.Dangerous)])
     assert_scan("GHSA-q77w-mwjj-7mqx.pkl", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-jgw4-cr84-mqxg.bin", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
     assert_scan("malicious1_crc.zip", [Global("builtins", name="eval", safety=SafetyLevel.Dangerous)])
 
 
