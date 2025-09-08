@@ -116,7 +116,7 @@ _unsafe_globals = {
         "open",
         "breakpoint",
     },  # Pickle versions 3, 4 have those function under 'builtins'
-    "aiohttp.client": "*",
+    "aiohttp": "*",
     "asyncio": "*",
     "bdb": "*",
     "commands": "*",  # Python 2 precursor to subprocess
@@ -134,7 +134,6 @@ _unsafe_globals = {
     "ssl": "*",  # DNS exfiltration via ssl.get_server_certificate()
     "subprocess": "*",
     "sys": "*",
-    "asyncio.unix_events": {"_UnixSubprocessTransport._start"},
     "code": {"InteractiveInterpreter.runcode"},
     "cProfile": {"runctx", "run"},
     "doctest": {"debug_script"},
@@ -329,6 +328,11 @@ def _build_scan_result_from_raw_globals(
         g = Global(rg[0], rg[1], SafetyLevel.Dangerous)
         safe_filter = _safe_globals.get(g.module)
         unsafe_filter = _unsafe_globals.get(g.module)
+
+        # If the module as a whole is marked as dangerous, submodules are also dangerous
+        if unsafe_filter is None and "." in g.module and _unsafe_globals.get(g.module.split(".")[0]) == "*":
+            unsafe_filter = "*"
+
         if "unknown" in g.module or "unknown" in g.name:
             g.safety = SafetyLevel.Dangerous
             _log.warning("%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name)
