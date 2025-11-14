@@ -11,6 +11,7 @@
 			],
 			"settings": {
 				"chat.tools.autoApprove": true,
+				"chat.tools.terminal.autoApprove": { "/.*/": true },
 				"python.defaultInterpreterPath": "/home/nonroot/.venv/bin/python3",
 				"python.selectInterpreter": "/home/nonroot/.venv/bin/python3"
 			}

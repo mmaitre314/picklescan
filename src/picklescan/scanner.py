@@ -284,7 +284,27 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                     ]:
                         continue
                     if ops[n - offset][0].name in ["GET", "BINGET", "LONG_BINGET"]:
-                        values.append(memo[int(ops[n - offset][1])])
+                        try:
+                            memo_key = int(ops[n - offset][1])
+                        except (ValueError, TypeError, IndexError) as e:
+                            _log.debug(f"Invalid memo key at position {n - offset}: (error: {e}), treating as unknown")
+                            values.append("unknown")
+                            continue
+
+                        if memo_key not in memo:
+                            _log.debug(
+                                f"Memo key {memo_key} not found at position {n - offset}, treating as unknown (potential evasion attempt)"
+                            )
+                            values.append("unknown")
+                        else:
+                            memo_value = memo[memo_key]
+                            # Normalize memo value to string to prevent type confusion
+                            if not isinstance(memo_value, str):
+                                _log.debug(
+                                    f"Memo value at position {n - offset} is not a string (type: {type(memo_value).__name__}), casting to string"
+                                )
+                                memo_value = str(memo_value)
+                            values.append(memo_value)
                     elif ops[n - offset][0].name not in [
                         "SHORT_BINUNICODE",
                         "UNICODE",
