@@ -11,11 +11,6 @@ import pip
 from code import InteractiveInterpreter
 from doctest import debug_script
 from functools import partial
-from idlelib.autocomplete import AutoComplete, ATTRS
-from idlelib.calltip import Calltip, get_entity
-from idlelib.debugobj import ObjectTreeItem
-from idlelib.pyshell import ModifiedInterpreter
-from idlelib.run import Executive
 from profile import Profile
 from trace import Trace
 from typing import Callable, Any, Union
@@ -248,14 +243,20 @@ def reduce_GHSA_f54q_57x4_jg88():
 
 
 def reduce_GHSA_3vg9_h568_4w9m():
+    from idlelib.debugobj import ObjectTreeItem
+
     return ObjectTreeItem.SetText, ({}, _payload)
 
 
 def reduce_GHSA_6w4w_5w54_rjvr():
+    from idlelib.autocomplete import AutoComplete
+
     return AutoComplete.get_entity, ({}, _payload)
 
 
 def reduce_GHSA_7cq8_mj8x_j263():
+    from idlelib.autocomplete import AutoComplete, ATTRS
+
     return AutoComplete.fetch_completions, ({}, _payload, ATTRS)
 
 
@@ -264,10 +265,14 @@ def reduce_GHSA_cj3c_v495_4xqh():
 
 
 def reduce_GHSA_8r4j_24qv_fmq9():
+    from idlelib.calltip import Calltip
+
     return Calltip.fetch_tip, ({}, _payload)
 
 
 def reduce_GHSA_9xph_j2h6_g47v():
+    from idlelib.calltip import get_entity
+
     return get_entity, (_payload,)
 
 
@@ -290,14 +295,20 @@ def reduce_GHSA_p9w7_82w4_7q8m():
 
 
 def reduce_GHSA_m869_42cg_3xwr():
+    from idlelib.run import Executive
+
     return Executive.runcode, ({}, _payload)
 
 
 def reduce_GHSA_j343_8v2j_ff7w():
+    from idlelib.pyshell import ModifiedInterpreter
+
     return ModifiedInterpreter.runcommand, ({}, _payload)
 
 
 def reduce_GHSA_3gf5_cxq9_w223():
+    from idlelib.pyshell import ModifiedInterpreter
+
     return ModifiedInterpreter.runcode, ({}, _payload)
 
 
@@ -599,6 +610,74 @@ def initialize_pickle_files():
                 pickle.REDUCE,
                 pickle.STOP,
                 b"\n\n\t\t",
+            ]
+        ),
+    )
+
+    initialize_data_file(
+        f"{_root_path}/data2/keyerror-exploit.pkl",
+        b"".join(
+            [
+                pickle.PROTO,
+                b"\x04",  # Protocol >= 4 (required for STACK_GLOBAL)
+                # Add dangerous import with verifiable side effects
+                pickle.GLOBAL,
+                b"os\nsystem\n",
+                pickle.UNICODE,
+                b'echo "pwned by memo keyerror"\n',
+                pickle.TUPLE1,
+                pickle.REDUCE,
+                pickle.POP,
+                # Store something in memo[0] to make the pickle more realistic
+                pickle.SHORT_BINUNICODE,
+                b"\x02os",
+                pickle.MEMOIZE,  # Store "os" in memo[0]
+                # Try to use STACK_GLOBAL with non-existent memo key
+                pickle.BINGET,
+                b"\x03",  # Try to retrieve memo[3] (doesn't exist!)
+                pickle.BINGET,
+                b"\x00",  # Retrieve memo[0] ("os")
+                pickle.STACK_GLOBAL,  # This will cause KeyError: 3
+                # Add some benign data to complete the pickle
+                pickle.BININT1,
+                b"\x42",
+                pickle.STOP,
+            ]
+        ),
+    )
+
+    initialize_data_file(
+        f"{_root_path}/data2/type-confusion-exploit.pkl",
+        b"".join(
+            [
+                pickle.PROTO,
+                b"\x04",  # Protocol >= 4 (required for STACK_GLOBAL)
+                # Add dangerous import with verifiable side effects
+                pickle.GLOBAL,
+                b"os\nsystem\n",
+                pickle.UNICODE,
+                b'echo "type-confusion-exploit"\n',
+                pickle.TUPLE1,
+                pickle.REDUCE,
+                pickle.POP,
+                # Store integer in memo to cause type confusion
+                pickle.BININT,
+                b"\x2a\x00\x00\x00",  # Push integer 42
+                pickle.MEMOIZE,  # Store 42 in memo[0]
+                # Store string in memo
+                pickle.SHORT_BINUNICODE,
+                b"\x02os",  # Push "os"
+                pickle.MEMOIZE,  # Store "os" in memo[1]
+                # Use STACK_GLOBAL with type-confused values
+                pickle.BINGET,
+                b"\x00",  # Retrieve memo[0] (integer 42)
+                pickle.BINGET,
+                b"\x01",  # Retrieve memo[1] ("os")
+                pickle.STACK_GLOBAL,  # Try to construct global from (42, "os")
+                # Complete the pickle
+                pickle.BININT1,
+                b"\x42",
+                pickle.STOP,
             ]
         ),
     )
@@ -1046,6 +1125,8 @@ def test_scan_file_path():
     assert_scan("GHSA-q77w-mwjj-7mqx.pkl", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
     assert_scan("GHSA-jgw4-cr84-mqxg.bin", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
     assert_scan("malicious1_crc.zip", [Global("builtins", name="eval", safety=SafetyLevel.Dangerous)])
+    assert_scan("keyerror-exploit.pkl", [Global("os", "system", SafetyLevel.Dangerous), Global("unknown", "os", SafetyLevel.Dangerous)])
+    assert_scan("type-confusion-exploit.pkl", [Global("42", "os", SafetyLevel.Suspicious), Global("os", "system", SafetyLevel.Dangerous)])
 
 
 def test_scan_file_path_npz():
