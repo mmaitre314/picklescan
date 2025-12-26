@@ -343,6 +343,12 @@ def reduce_GHSA_84r2_jw7c_4r5q():
     return (mc, (ModuleLocator("os"),))
 
 
+def reduce_GHSA_vqmv_47xg_9wpr():
+    import pty
+
+    return pty.spawn, (["/bin/sh", "-c", "id; exit"],)
+
+
 def initialize_pickle_file(path: str, obj: Any, version: int):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
@@ -767,6 +773,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-m273-6v24-x4m4.pkl", reduce_GHSA_m273_6v24_x4m4)
     initialize_pickle_file_from_reduce("GHSA-4675-36f9-wf6r.pkl", reduce_GHSA_4675_36f9_wf6r)
     initialize_pickle_file_from_reduce("GHSA-84r2-jw7c-4r5q.pkl", reduce_GHSA_84r2_jw7c_4r5q)
+    initialize_pickle_file_from_reduce("GHSA-vqmv-47xg-9wpr.pkl", reduce_GHSA_vqmv_47xg_9wpr)
 
 
 def initialize_numpy_files():
