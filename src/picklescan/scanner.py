@@ -136,6 +136,7 @@ _unsafe_globals = {
     "sys": "*",
     "code": {"InteractiveInterpreter.runcode"},
     "cProfile": {"runctx", "run"},
+    "distutils.file_util": "*",  # arbitrary file write via distutils.file_util.write_file()
     "doctest": {"debug_script"},
     "ensurepip": {"_run_pip"},
     "idlelib.autocomplete": {"AutoComplete.get_entity", "AutoComplete.fetch_completions"},

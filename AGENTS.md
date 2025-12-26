@@ -1,6 +1,20 @@
-This repo contains a security scanner which analyzes Python Pickle files and reports dangerous function calls. It relies on an allow-list called `_safe_globals` and a block-list called `_unsafe_globals` in `src/picklescan/scanner.py`. Those lists need to be updated when bugs or security advisories report detection issues.
+This repo contains a security scanner which analyzes Python Pickle files and reports dangerous function calls.
 
-To update the block list, create a sample Pickle file reproing the issue, add a test for it, verify that the test fails, update the block list, and verify the test passes.
+# Code style
+
+After making code changes, lint the code using:
+```
+black src tests --line-length 140
+flake8 src tests --count --show-source
+```
+
+# Bug fixes
+
+## Update block-list
+
+The scanner relies on an allow-list called `_safe_globals` and a block-list called `_unsafe_globals` in `src/picklescan/scanner.py`. Those lists need to be updated when bugs or security advisories report detection issues.
+
+To update the block-list, create a sample Pickle file reproing the issue, add a test for it, verify that the test fails, update the block-list, and verify the test passes.
 
 In more details:
 
