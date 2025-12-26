@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/azurelinux/base/python:3.12
+FROM mcr.microsoft.com/azurelinux/base/python:3.11
 
 # Install Dev Container dependencies
 RUN tdnf install -y git tar awk && tdnf clean all
