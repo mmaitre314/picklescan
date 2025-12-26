@@ -325,6 +325,24 @@ def reduce_GHSA_4675_36f9_wf6r():
     return ctypes.CDLL, (None,)
 
 
+def reduce_GHSA_84r2_jw7c_4r5q():
+    import operator
+    import pydoc
+
+    # pydoc.locate can dynamically resolve and import arbitrary modules
+    # operator.methodcaller allows executing a method on an object
+    # Combined they can achieve RCE: methodcaller("system", "cmd")(pydoc.locate("os"))
+    class ModuleLocator:
+        def __init__(self, module_name):
+            self.module_name = module_name
+
+        def __reduce__(self):
+            return (pydoc.locate, (self.module_name,))
+
+    mc = operator.methodcaller("system", "echo pwned")
+    return (mc, (ModuleLocator("os"),))
+
+
 def initialize_pickle_file(path: str, obj: Any, version: int):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
@@ -748,6 +766,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-jgw4-cr84-mqxg.bin", reduce_GHSA_q77w_mwjj_7mqx)
     initialize_pickle_file_from_reduce("GHSA-m273-6v24-x4m4.pkl", reduce_GHSA_m273_6v24_x4m4)
     initialize_pickle_file_from_reduce("GHSA-4675-36f9-wf6r.pkl", reduce_GHSA_4675_36f9_wf6r)
+    initialize_pickle_file_from_reduce("GHSA-84r2-jw7c-4r5q.pkl", reduce_GHSA_84r2_jw7c_4r5q)
 
 
 def initialize_numpy_files():

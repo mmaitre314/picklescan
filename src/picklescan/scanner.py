@@ -126,7 +126,7 @@ _unsafe_globals = {
     "numpy.testing._private.utils": "*",  # runstring() in this module is a synonym for exec()
     "nt": "*",  # Alias for 'os' on Windows. Includes os.system()
     "posix": "*",  # Alias for 'os' on Linux. Includes os.system()
-    "operator": "attrgetter",  # Ex of code execution: operator.attrgetter("system")(__import__("os"))("echo pwned")
+    "operator": {"attrgetter", "itemgetter", "methodcaller"},  # Ex of code execution: operator.attrgetter("system")(__import__("os"))("echo pwned")
     "os": "*",
     "requests.api": "*",
     "runpy": "*",  # Includes runpy._run_code
@@ -152,7 +152,7 @@ _unsafe_globals = {
     "_pickle": "*",
     "pip": "*",
     "profile": {"Profile.run", "Profile.runctx"},
-    "pydoc": "pipepager",  # pydoc.pipepager('help','echo pwned')
+    "pydoc": "*",  # pydoc.locate can import arbitrary modules, pydoc.pipepager allows command execution
     "timeit": "*",
     "torch._dynamo.guards": {"GuardBuilder.get"},
     "torch._inductor.codecache": "compile_file",  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
