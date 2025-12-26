@@ -2,13 +2,13 @@
 	"name": "Python",
 	"build": {
 		"dockerfile": "Dockerfile",
-        "context": ".."
+		"context": ".."
 	},
+	"postStartCommand": "source /home/nonroot/.venv/bin/activate && python3 -m pip install --disable-pip-version-check -e .",
+	"postAttachCommand": "source /home/nonroot/.venv/bin/activate",
 	"customizations": {
 		"vscode": {
-			"extensions": [
-				"ms-python.python"
-			],
+			"extensions": [ "ms-python.python", "github.copilot-chat" ],
 			"settings": {
 				"chat.tools.autoApprove": true,
 				"chat.tools.terminal.autoApprove": { "/.*/": true },
