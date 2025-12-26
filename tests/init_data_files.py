@@ -349,6 +349,12 @@ def reduce_GHSA_vqmv_47xg_9wpr():
     return pty.spawn, (["/bin/sh", "-c", "id; exit"],)
 
 
+def reduce_GHSA_r8g5_cgf2_4m4m():
+    from numpy.f2py.crackfortran import getlincoef
+
+    return getlincoef, (_payload, [])
+
+
 def initialize_pickle_file(path: str, obj: Any, version: int):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
@@ -774,6 +780,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-4675-36f9-wf6r.pkl", reduce_GHSA_4675_36f9_wf6r)
     initialize_pickle_file_from_reduce("GHSA-84r2-jw7c-4r5q.pkl", reduce_GHSA_84r2_jw7c_4r5q)
     initialize_pickle_file_from_reduce("GHSA-vqmv-47xg-9wpr.pkl", reduce_GHSA_vqmv_47xg_9wpr)
+    initialize_pickle_file_from_reduce("GHSA-r8g5-cgf2-4m4m.pkl", reduce_GHSA_r8g5_cgf2_4m4m)
 
 
 def initialize_numpy_files():

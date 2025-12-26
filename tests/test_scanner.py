@@ -381,6 +381,7 @@ def test_scan_file_path():
         ],
     )
     assert_scan("GHSA-vqmv-47xg-9wpr.pkl", [Global("pty", "spawn", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-r8g5-cgf2-4m4m.pkl", [Global("numpy.f2py.crackfortran", "getlincoef", SafetyLevel.Dangerous)])
     assert_scan("malicious1_crc.zip", [Global("builtins", name="eval", safety=SafetyLevel.Dangerous)])
     assert_scan("keyerror-exploit.pkl", [Global("os", "system", SafetyLevel.Dangerous), Global("unknown", "os", SafetyLevel.Dangerous)])
     assert_scan("type-confusion-exploit.pkl", [Global("42", "os", SafetyLevel.Suspicious), Global("os", "system", SafetyLevel.Dangerous)])

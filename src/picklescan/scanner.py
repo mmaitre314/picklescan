@@ -123,6 +123,7 @@ _unsafe_globals = {
     "ctypes": "*",  # Foreign function interface, can load DLLs, call C functions, manipulate raw memory
     "functools": "partial",  # functools.partial(os.system, "echo pwned")
     "httplib": "*",  # Includes http.client.HTTPSConnection()
+    "numpy.f2py": "*",  # Multiple unsafe functions (e.g., getlincoef, _eval_length) that call eval on arbitrary strings
     "numpy.testing._private.utils": "*",  # runstring() in this module is a synonym for exec()
     "nt": "*",  # Alias for 'os' on Windows. Includes os.system()
     "posix": "*",  # Alias for 'os' on Linux. Includes os.system()
@@ -357,9 +358,14 @@ def _build_scan_result_from_raw_globals(
         safe_filter = _safe_globals.get(g.module)
         unsafe_filter = _unsafe_globals.get(g.module)
 
-        # If the module as a whole is marked as dangerous, submodules are also dangerous
-        if unsafe_filter is None and "." in g.module and _unsafe_globals.get(g.module.split(".")[0]) == "*":
-            unsafe_filter = "*"
+        # If any parent module is marked as dangerous with "*", submodules are also dangerous
+        if unsafe_filter is None and "." in g.module:
+            module_parts = g.module.split(".")
+            for i in range(1, len(module_parts)):
+                parent_module = ".".join(module_parts[:i])
+                if _unsafe_globals.get(parent_module) == "*":
+                    unsafe_filter = "*"
+                    break
 
         if "unknown" in g.module or "unknown" in g.name:
             g.safety = SafetyLevel.Dangerous
