@@ -372,6 +372,7 @@ def test_scan_file_path():
     assert_scan("GHSA-q77w-mwjj-7mqx.pkl", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
     assert_scan("GHSA-jgw4-cr84-mqxg.bin", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
     assert_scan("GHSA-m273-6v24-x4m4.pkl", [Global("distutils.file_util", "write_file", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-4675-36f9-wf6r.pkl", [Global("ctypes", "CDLL", SafetyLevel.Dangerous)])
     assert_scan("malicious1_crc.zip", [Global("builtins", name="eval", safety=SafetyLevel.Dangerous)])
     assert_scan("keyerror-exploit.pkl", [Global("os", "system", SafetyLevel.Dangerous), Global("unknown", "os", SafetyLevel.Dangerous)])
     assert_scan("type-confusion-exploit.pkl", [Global("42", "os", SafetyLevel.Suspicious), Global("os", "system", SafetyLevel.Dangerous)])

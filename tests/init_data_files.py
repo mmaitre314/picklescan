@@ -318,6 +318,13 @@ def reduce_GHSA_m273_6v24_x4m4():
     return distutils.file_util.write_file, ("pwned_config.env", ["malicious content"])
 
 
+def reduce_GHSA_4675_36f9_wf6r():
+    import ctypes
+
+    # ctypes can be used to load DLLs, call C functions directly, and manipulate raw memory
+    return ctypes.CDLL, (None,)
+
+
 def initialize_pickle_file(path: str, obj: Any, version: int):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
@@ -740,6 +747,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-q77w-mwjj-7mqx.pkl", reduce_GHSA_q77w_mwjj_7mqx)
     initialize_pickle_file_from_reduce("GHSA-jgw4-cr84-mqxg.bin", reduce_GHSA_q77w_mwjj_7mqx)
     initialize_pickle_file_from_reduce("GHSA-m273-6v24-x4m4.pkl", reduce_GHSA_m273_6v24_x4m4)
+    initialize_pickle_file_from_reduce("GHSA-4675-36f9-wf6r.pkl", reduce_GHSA_4675_36f9_wf6r)
 
 
 def initialize_numpy_files():

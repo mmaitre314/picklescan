@@ -120,6 +120,7 @@ _unsafe_globals = {
     "asyncio": "*",
     "bdb": "*",
     "commands": "*",  # Python 2 precursor to subprocess
+    "ctypes": "*",  # Foreign function interface, can load DLLs, call C functions, manipulate raw memory
     "functools": "partial",  # functools.partial(os.system, "echo pwned")
     "httplib": "*",  # Includes http.client.HTTPSConnection()
     "numpy.testing._private.utils": "*",  # runstring() in this module is a synonym for exec()
