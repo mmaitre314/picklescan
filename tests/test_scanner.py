@@ -385,8 +385,14 @@ def test_scan_file_path():
     assert_scan("malicious1_crc.zip", [Global("builtins", name="eval", safety=SafetyLevel.Dangerous)])
     assert_scan("keyerror-exploit.pkl", [Global("os", "system", SafetyLevel.Dangerous), Global("unknown", "os", SafetyLevel.Dangerous)])
     assert_scan("type-confusion-exploit.pkl", [Global("42", "os", SafetyLevel.Suspicious), Global("os", "system", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-955r-x9j8-7rhh.pkl", [Global('_operator', 'methodcaller', SafetyLevel.Dangerous), Global('builtins', '__import__', SafetyLevel.Suspicious)])
-    assert_scan("GHSA-46h3-79wf-xr6c.pkl", [Global('_operator', 'attrgetter', SafetyLevel.Dangerous), Global('builtins', '__import__', SafetyLevel.Suspicious)])
+    assert_scan(
+        "GHSA-955r-x9j8-7rhh.pkl",
+        [Global("_operator", "methodcaller", SafetyLevel.Dangerous), Global("builtins", "__import__", SafetyLevel.Suspicious)],
+    )
+    assert_scan(
+        "GHSA-46h3-79wf-xr6c.pkl",
+        [Global("_operator", "attrgetter", SafetyLevel.Dangerous), Global("builtins", "__import__", SafetyLevel.Suspicious)],
+    )
 
 
 def test_scan_file_path_npz():
