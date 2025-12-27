@@ -99,6 +99,7 @@ _safe_globals = {
 
 _unsafe_globals = {
     "__builtin__": {
+        # Pickle versions 0, 1, 2 have those function under '__builtin__'
         "eval",
         "compile",
         "getattr",
@@ -106,8 +107,9 @@ _unsafe_globals = {
         "exec",
         "open",
         "breakpoint",
-    },  # Pickle versions 0, 1, 2 have those function under '__builtin__'
+    },
     "builtins": {
+        # Pickle versions 3, 4 have those function under 'builtins'
         "eval",
         "compile",
         "getattr",
@@ -115,7 +117,7 @@ _unsafe_globals = {
         "exec",
         "open",
         "breakpoint",
-    },  # Pickle versions 3, 4 have those function under 'builtins'
+    },
     "aiohttp": "*",
     "asyncio": "*",
     "bdb": "*",
@@ -127,6 +129,11 @@ _unsafe_globals = {
     "numpy.testing._private.utils": "*",  # runstring() in this module is a synonym for exec()
     "nt": "*",  # Alias for 'os' on Windows. Includes os.system()
     "posix": "*",  # Alias for 'os' on Linux. Includes os.system()
+    "_operator": {
+        "attrgetter",  # Ex of code execution: operator.attrgetter("system")(__import__("os"))("echo pwned")
+        "itemgetter",
+        "methodcaller",
+    },
     "operator": {
         "attrgetter",  # Ex of code execution: operator.attrgetter("system")(__import__("os"))("echo pwned")
         "itemgetter",

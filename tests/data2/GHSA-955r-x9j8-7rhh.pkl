@@ -1,0 +1,10 @@
+cbuiltins
+__import__
+(Vos
+tRp0
+0c_operator
+methodcaller
+(Vsystem
+Vecho "pwned by _operator.methodcaller"
+tR(g0
+tR.

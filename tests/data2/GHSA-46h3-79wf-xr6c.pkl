@@ -1,0 +1,10 @@
+cbuiltins
+__import__
+(Vos
+tRp0
+0c_operator
+attrgetter
+(Vsystem
+tR(g0
+tR(Vecho "pwned by _operator.attrgetter"
+tR.
