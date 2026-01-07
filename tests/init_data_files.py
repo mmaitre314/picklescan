@@ -355,6 +355,18 @@ def reduce_GHSA_r8g5_cgf2_4m4m():
     return getlincoef, (_payload, [])
 
 
+def reduce_io_FileIO():
+    import io
+
+    return io.FileIO, ("/etc/hosts", "r")
+
+
+def reduce_urllib_request_urlopen():
+    import urllib.request
+
+    return urllib.request.urlopen, ("https://example.invalid",)
+
+
 def initialize_pickle_file(path: str, obj: Any, version: int):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
@@ -781,6 +793,8 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-84r2-jw7c-4r5q.pkl", reduce_GHSA_84r2_jw7c_4r5q)
     initialize_pickle_file_from_reduce("GHSA-vqmv-47xg-9wpr.pkl", reduce_GHSA_vqmv_47xg_9wpr)
     initialize_pickle_file_from_reduce("GHSA-r8g5-cgf2-4m4m.pkl", reduce_GHSA_r8g5_cgf2_4m4m)
+    initialize_pickle_file_from_reduce("io_FileIO.pkl", reduce_io_FileIO)
+    initialize_pickle_file_from_reduce("urllib_request_urlopen.pkl", reduce_urllib_request_urlopen)
 
 
 def initialize_numpy_files():

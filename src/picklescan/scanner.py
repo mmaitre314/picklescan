@@ -125,6 +125,7 @@ _unsafe_globals = {
     "ctypes": "*",  # Foreign function interface, can load DLLs, call C functions, manipulate raw memory
     "functools": "partial",  # functools.partial(os.system, "echo pwned")
     "httplib": "*",  # Includes http.client.HTTPSConnection()
+    "_io": {"FileIO"},  # io.FileIO is stored as _io.FileIO, can read arbitrary files bypassing builtins.open blocklist
     "numpy.f2py": "*",  # Multiple unsafe functions (e.g., getlincoef, _eval_length) that call eval on arbitrary strings
     "numpy.testing._private.utils": "*",  # runstring() in this module is a synonym for exec()
     "nt": "*",  # Alias for 'os' on Windows. Includes os.system()
@@ -181,6 +182,7 @@ _unsafe_globals = {
         "basichandlers"
     },  # allows storing a pickle inside a pickle (if this has valid use cases, scan the input bytes instead of flagging the global)
     "trace": {"Trace.run", "Trace.runctx"},
+    "urllib.request": "*",  # urllib.request.urlopen can be used for SSRF and data exfiltration
     "venv": "*",
     "webbrowser": "*",  # Includes webbrowser.open()
 }
