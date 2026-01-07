@@ -393,6 +393,8 @@ def test_scan_file_path():
         "GHSA-46h3-79wf-xr6c.pkl",
         [Global("_operator", "attrgetter", SafetyLevel.Dangerous), Global("builtins", "__import__", SafetyLevel.Suspicious)],
     )
+    assert_scan("io_FileIO.pkl", [Global("_io", "FileIO", SafetyLevel.Dangerous)])
+    assert_scan("urllib_request_urlopen.pkl", [Global("urllib.request", "urlopen", SafetyLevel.Dangerous)])
 
 
 def test_scan_file_path_npz():
