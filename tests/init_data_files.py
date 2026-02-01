@@ -843,6 +843,25 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("io_FileIO.pkl", reduce_io_FileIO)
     initialize_pickle_file_from_reduce("urllib_request_urlopen.pkl", reduce_urllib_request_urlopen)
 
+    # types.CodeType can construct arbitrary code objects - using raw opcodes since CodeType can't be pickled directly
+    initialize_data_file(
+        f"{_root_path}/data2/types_CodeType.pkl",
+        b"".join(
+            [
+                pickle.PROTO + b"\x04",  # Protocol 4
+                pickle.SHORT_BINUNICODE + bytes([5]) + b"types",
+                pickle.MEMOIZE,
+                pickle.SHORT_BINUNICODE + bytes([8]) + b"CodeType",
+                pickle.MEMOIZE,
+                pickle.STACK_GLOBAL,
+                pickle.MEMOIZE,
+                pickle.EMPTY_TUPLE,
+                pickle.REDUCE,  # types.CodeType() - will fail but scanner should detect it
+                pickle.STOP,
+            ]
+        ),
+    )
+
     initialize_cloudpickle_exploit_file(f"{_root_path}/data2/cloudpickle_codeinjection.pkl")
 
     initialize_not_a_pickle_file(f"{_root_path}/data/not_a_pickle.bin")
