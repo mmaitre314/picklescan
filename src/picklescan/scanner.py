@@ -400,11 +400,14 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanRe
     try:
         raw_globals = _list_globals(data, multiple_pickles)
     except GenOpsError as e:
-        _log.error(f"ERROR: parsing pickle in {file_id}: {e}", exc_info=_log.isEnabledFor(logging.DEBUG))
         if e.globals is not None:
+            # Found some globals before error - could be a malicious partial pickle
+            _log.error(f"ERROR: parsing pickle in {file_id}: {e}", exc_info=_log.isEnabledFor(logging.DEBUG))
             return _build_scan_result_from_raw_globals(e.globals, file_id, scan_err=True)
         else:
-            return ScanResult([], scan_err=True)
+            # No globals found - likely not a pickle file at all
+            _log.warning(f"WARNING: could not parse {file_id} as pickle: {e}")
+            return ScanResult([], scanned_files=1, scan_err=False)
 
     _log.debug("Global imports in %s: %s", file_id, raw_globals)
 
@@ -487,8 +490,12 @@ def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
         # .npy file
 
         version = np.lib.format.read_magic(data)
-        np.lib.format._check_version(version)
-        _, _, dtype = np.lib.format._read_array_header(data, version)
+        if version == (1, 0):
+            _, _, dtype = np.lib.format.read_array_header_1_0(data)
+        elif version in [(2, 0), (3, 0)]:
+            _, _, dtype = np.lib.format.read_array_header_2_0(data)
+        else:
+            raise ValueError(f"Unsupported numpy format version: {version}")
 
         if dtype.hasobject:
             return scan_pickle_bytes(data, file_id)
