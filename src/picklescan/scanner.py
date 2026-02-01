@@ -118,6 +118,7 @@ _unsafe_globals = {
         "open",
         "breakpoint",
     },
+    "cloudpickle.cloudpickle": "*",  # Can reconstruct arbitrary callables via CodeType, enabling code execution
     "aiohttp": "*",
     "asyncio": "*",
     "bdb": "*",

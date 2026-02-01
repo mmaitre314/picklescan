@@ -397,6 +397,18 @@ def test_scan_file_path():
     )
     assert_scan("io_FileIO.pkl", [Global("_io", "FileIO", SafetyLevel.Dangerous)])
     assert_scan("urllib_request_urlopen.pkl", [Global("urllib.request", "urlopen", SafetyLevel.Dangerous)])
+    # cloudpickle uses _make_function and _builtin_type with CodeType to reconstruct arbitrary callables
+    assert_scan(
+        "cloudpickle_codeinjection.pkl",
+        [
+            Global("cloudpickle.cloudpickle", "_function_setstate", SafetyLevel.Dangerous),
+            Global("cloudpickle.cloudpickle", "_builtin_type", SafetyLevel.Dangerous),
+            Global("cloudpickle.cloudpickle", "_make_function", SafetyLevel.Dangerous),
+            Global("cloudpickle.cloudpickle", "_make_cell", SafetyLevel.Dangerous),
+            Global("cloudpickle.cloudpickle", "_make_empty_cell", SafetyLevel.Dangerous),
+            Global("cloudpickle.cloudpickle", "subimport", SafetyLevel.Dangerous),
+        ],
+    )
 
 
 def test_scan_file_path_npz():
