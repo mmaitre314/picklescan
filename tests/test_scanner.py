@@ -397,6 +397,8 @@ def test_scan_file_path():
     )
     assert_scan("io_FileIO.pkl", [Global("_io", "FileIO", SafetyLevel.Dangerous)])
     assert_scan("urllib_request_urlopen.pkl", [Global("urllib.request", "urlopen", SafetyLevel.Dangerous)])
+    # logging.FileHandler can create arbitrary files on the filesystem
+    assert_scan("logging_FileHandler.pkl", [Global("logging", "FileHandler", SafetyLevel.Dangerous)])
     # types.CodeType can construct arbitrary code objects for execution
     assert_scan("types_CodeType.pkl", [Global("types", "CodeType", SafetyLevel.Dangerous)])
     # cloudpickle uses _make_function and _builtin_type with CodeType to reconstruct arbitrary callables

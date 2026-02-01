@@ -304,6 +304,12 @@ def reduce_GHSA_49gj_c84q_6qm9():
     return cProfile.run, (_payload,)
 
 
+def reduce_logging_FileHandler():
+    from logging import FileHandler
+
+    return FileHandler, ("evil.log",)
+
+
 def reduce_GHSA_q77w_mwjj_7mqx():
     if sys.platform == "win32":
         sys.platform = "mock"
@@ -842,6 +848,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-r8g5-cgf2-4m4m.pkl", reduce_GHSA_r8g5_cgf2_4m4m)
     initialize_pickle_file_from_reduce("io_FileIO.pkl", reduce_io_FileIO)
     initialize_pickle_file_from_reduce("urllib_request_urlopen.pkl", reduce_urllib_request_urlopen)
+    initialize_pickle_file_from_reduce("logging_FileHandler.pkl", reduce_logging_FileHandler)
 
     # types.CodeType can construct arbitrary code objects - using raw opcodes since CodeType can't be pickled directly
     initialize_data_file(

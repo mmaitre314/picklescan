@@ -135,6 +135,7 @@ _unsafe_globals = {
     "ctypes": "*",  # Foreign function interface, can load DLLs, call C functions, manipulate raw memory
     "functools": "partial",  # functools.partial(os.system, "echo pwned")
     "httplib": "*",  # Includes http.client.HTTPSConnection()
+    "logging": {"FileHandler"},  # logging.FileHandler can create arbitrary files on the filesystem
     "_io": {"FileIO"},  # io.FileIO is stored as _io.FileIO, can read arbitrary files bypassing builtins.open blocklist
     "numpy.f2py": "*",  # Multiple unsafe functions (e.g., getlincoef, _eval_length) that call eval on arbitrary strings
     "numpy.testing._private.utils": "*",  # runstring() in this module is a synonym for exec()
