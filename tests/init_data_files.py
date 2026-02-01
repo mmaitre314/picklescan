@@ -818,6 +818,7 @@ def initialize_pickle_files():
 
     initialize_not_a_pickle_file(f"{_root_path}/data/not_a_pickle.bin")
 
+
 def initialize_numpy_files():
     import numpy as np
 
