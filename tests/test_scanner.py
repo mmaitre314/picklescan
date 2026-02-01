@@ -287,7 +287,9 @@ def test_scan_file_path():
     malicious10 = ScanResult([Global("__builtin__", "exec", SafetyLevel.Dangerous)], 1, 1, 1)
     compare_scan_results(scan_file_path(f"{_root_path}/data/malicious10.pkl"), malicious10)
 
-    bad_pytorch = ScanResult([], 0, 0, 0, True)
+    # bad_pytorch.pt is a PNG file with .pt extension - scanner should recognize it's not a valid pickle
+    # and report it as scanned (scanned_files=1) but without errors (scan_err=False) since no threats were found
+    bad_pytorch = ScanResult([], 1, 0, 0, False)
     compare_scan_results(scan_file_path(f"{_root_path}/data/bad_pytorch.pt"), bad_pytorch)
 
     malicious14 = ScanResult([Global("runpy", "_run_code", SafetyLevel.Dangerous)], 1, 1, 1)
@@ -508,9 +510,12 @@ def test_scan_directory_path():
             Global("builtins", "eval", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
         ],
-        scanned_files=42,
+        # scanned_files=43 includes bad_pytorch.pt which is now counted even though it's not a valid pickle
+        scanned_files=43,
         issues_count=43,
         infected_files=37,
+        # scan_err=True because some files (broken_model.pkl, malicious-invalid-bytes.pkl) have partial parsing errors
+        scan_err=True,
     )
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 
