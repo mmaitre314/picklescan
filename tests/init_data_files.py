@@ -469,6 +469,26 @@ def initialize_corrupt_zip_file_crc(path: str, file_name: str, data: bytes):
     print(f"Initialized file {path}.")
 
 
+def initialize_not_a_pickle_file(path: str):
+    """Create a binary file that starts with pickle GLOBAL opcode (0x63 = 'c') but contains
+    invalid UTF-8 bytes, causing 'utf-8' codec can't decode byte error.
+    This reproduces the issue seen with files like vitpose_h_wholebody_data.bin.
+    """
+    if os.path.exists(path):
+        print(f"File {path} already exists, skipping initialization.")
+        return
+
+    # Byte 0x63 is 'c' which is the GLOBAL opcode in pickle protocol 0/1/2
+    # The GLOBAL opcode expects to read two newline-terminated strings (module and name)
+    # We provide a valid module name "mod" followed by newline, then an invalid UTF-8 byte (0xf8)
+    # This triggers: 'utf-8' codec can't decode byte 0xf8 in position 0: invalid start byte
+    data = b"cmod\n\xf8\n"
+
+    with open(path, "wb") as file:
+        file.write(data)
+    print(f"Initialized file {path}.")
+
+
 def initialize_pickle_files():
     os.makedirs(f"{_root_path}/data", exist_ok=True)
 
@@ -796,6 +816,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("io_FileIO.pkl", reduce_io_FileIO)
     initialize_pickle_file_from_reduce("urllib_request_urlopen.pkl", reduce_urllib_request_urlopen)
 
+    initialize_not_a_pickle_file(f"{_root_path}/data/not_a_pickle.bin")
 
 def initialize_numpy_files():
     import numpy as np
