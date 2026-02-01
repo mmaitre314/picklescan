@@ -367,6 +367,33 @@ def reduce_urllib_request_urlopen():
     return urllib.request.urlopen, ("https://example.invalid",)
 
 
+def initialize_cloudpickle_exploit_file(path: str):
+    """Create a pickle file using cloudpickle that embeds arbitrary code via CodeType.
+
+    This reproduces the vulnerability where cloudpickle uses _make_function and _builtin_type
+    with CodeType to reconstruct arbitrary callables that can execute malicious code.
+    """
+    import cloudpickle
+    import builtins
+
+    class EvilClass:
+        @staticmethod
+        def _obfuscated_eval(payload):
+            getattr(builtins, "eval")(payload)
+
+        def __reduce__(self):
+            payload = "__import__('os').system('echo \"successful attack\"')"
+            return self._obfuscated_eval, (payload,)
+
+    if os.path.exists(path):
+        print(f"File {path} already exists, skipping initialization.")
+        return
+
+    with open(path, mode="wb") as f:
+        cloudpickle.dump(EvilClass(), f)
+    print(f"Initialized file {path}.")
+
+
 def initialize_pickle_file(path: str, obj: Any, version: int):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
@@ -815,6 +842,27 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-r8g5-cgf2-4m4m.pkl", reduce_GHSA_r8g5_cgf2_4m4m)
     initialize_pickle_file_from_reduce("io_FileIO.pkl", reduce_io_FileIO)
     initialize_pickle_file_from_reduce("urllib_request_urlopen.pkl", reduce_urllib_request_urlopen)
+
+    # types.CodeType can construct arbitrary code objects - using raw opcodes since CodeType can't be pickled directly
+    initialize_data_file(
+        f"{_root_path}/data2/types_CodeType.pkl",
+        b"".join(
+            [
+                pickle.PROTO + b"\x04",  # Protocol 4
+                pickle.SHORT_BINUNICODE + bytes([5]) + b"types",
+                pickle.MEMOIZE,
+                pickle.SHORT_BINUNICODE + bytes([8]) + b"CodeType",
+                pickle.MEMOIZE,
+                pickle.STACK_GLOBAL,
+                pickle.MEMOIZE,
+                pickle.EMPTY_TUPLE,
+                pickle.REDUCE,  # types.CodeType() - will fail but scanner should detect it
+                pickle.STOP,
+            ]
+        ),
+    )
+
+    initialize_cloudpickle_exploit_file(f"{_root_path}/data2/cloudpickle_codeinjection.pkl")
 
     initialize_not_a_pickle_file(f"{_root_path}/data/not_a_pickle.bin")
 

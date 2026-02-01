@@ -118,6 +118,16 @@ _unsafe_globals = {
         "open",
         "breakpoint",
     },
+    # cloudpickle can reconstruct arbitrary callables via CodeType, enabling code execution
+    "cloudpickle.cloudpickle": {
+        "_builtin_type",  # Used to access CodeType for arbitrary code construction
+        "_make_function",  # Creates functions from code objects
+        "_function_setstate",  # Sets internal function state
+        "_make_cell",  # Creates closure cells
+        "_make_empty_cell",  # Creates empty closure cells
+        "subimport",  # Imports arbitrary modules
+    },
+    "types": {"CodeType"},  # Can construct arbitrary code objects for execution
     "aiohttp": "*",
     "asyncio": "*",
     "bdb": "*",
