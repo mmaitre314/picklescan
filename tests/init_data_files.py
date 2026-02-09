@@ -17,6 +17,7 @@ from doctest import debug_script
 from functools import partial
 from profile import Profile
 from trace import Trace
+from types import CodeType
 from typing import Callable, Any
 
 _root_path = os.path.dirname(__file__)
@@ -371,6 +372,52 @@ def reduce_urllib_request_urlopen():
     import urllib.request
 
     return urllib.request.urlopen, ("https://example.invalid",)
+
+
+def initialize_codetype_exploit_file(path: str):
+    if os.path.exists(path):
+        print(f"File {path} already exists, skipping initialization.")
+        return
+
+    # Using raw opcodes since CodeType can't be pickled directly
+    p0 = b"".join(
+        [
+            pickle.PROTO + b"\x04",  # Protocol 4
+            pickle.SHORT_BINUNICODE + bytes([5]) + b"types",
+            pickle.MEMOIZE,
+            pickle.SHORT_BINUNICODE + bytes([8]) + b"CodeType",
+            pickle.MEMOIZE,
+            pickle.STACK_GLOBAL,
+            pickle.MEMOIZE,
+        ]
+    )
+
+    # Using cloudpickle._code_reduce to get the arguments needed to reconstruct a CodeType object that executes arbitrary code
+    from cloudpickle.cloudpickle import _code_reduce
+
+    _, code_args = _code_reduce(compile("print('CodeType serialization succeeded')", "<dynamic_code>", "exec"))
+    p1 = pickle.dumps(code_args, protocol=4)
+    assert p1[:2] == pickle.PROTO + b"\x04"
+    assert p1[-1:] == pickle.STOP
+    p1 = p1[2:-1]  # Skip the protocol header and STOP opcode
+
+    p2 = b"".join(
+        [
+            pickle.REDUCE,
+            pickle.STOP,
+        ]
+    )
+
+    p = p0 + p1 + p2
+
+    # Sanity check the pickle payload
+    code = pickle.loads(p)
+    assert type(code) == CodeType
+    eval(code)
+
+    with open(path, "wb") as file:
+        file.write(p)
+    print(f"Initialized file {path}.")
 
 
 def initialize_cloudpickle_exploit_file(path: str):
@@ -850,27 +897,8 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("urllib_request_urlopen.pkl", reduce_urllib_request_urlopen)
     initialize_pickle_file_from_reduce("logging_FileHandler.pkl", reduce_logging_FileHandler)
 
-    # types.CodeType can construct arbitrary code objects - using raw opcodes since CodeType can't be pickled directly
-    initialize_data_file(
-        f"{_root_path}/data2/types_CodeType.pkl",
-        b"".join(
-            [
-                pickle.PROTO + b"\x04",  # Protocol 4
-                pickle.SHORT_BINUNICODE + bytes([5]) + b"types",
-                pickle.MEMOIZE,
-                pickle.SHORT_BINUNICODE + bytes([8]) + b"CodeType",
-                pickle.MEMOIZE,
-                pickle.STACK_GLOBAL,
-                pickle.MEMOIZE,
-                pickle.EMPTY_TUPLE,
-                pickle.REDUCE,  # types.CodeType() - will fail but scanner should detect it
-                pickle.STOP,
-            ]
-        ),
-    )
-
     initialize_cloudpickle_exploit_file(f"{_root_path}/data2/cloudpickle_codeinjection.pkl")
-
+    initialize_codetype_exploit_file(f"{_root_path}/data2/types_CodeType.pkl")
     initialize_not_a_pickle_file(f"{_root_path}/data/not_a_pickle.bin")
 
 
