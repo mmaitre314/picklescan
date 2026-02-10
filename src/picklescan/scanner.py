@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import http.client
 import io
@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pickletools
+import re
 from tarfile import TarError
 from tempfile import TemporaryDirectory
 from typing import IO, List, Optional, Set, Tuple
@@ -49,6 +50,25 @@ class ScanResult:
         self.issues_count += sr.issues_count
         self.infected_files += sr.infected_files
         self.scan_err = self.scan_err or sr.scan_err
+
+
+@dataclass
+class ScanFilter:
+    """Filtering options for directory scans, modeled after ClamAV clamscan.
+
+    - ``exclude``: regexes matched against the full file path; matching files are skipped.
+    - ``include``: regexes matched against the full file path; when set, only matching files are scanned.
+    - ``exclude_dir``: regexes matched against directory paths; matching directories are not traversed.
+    - ``include_dir``: regexes matched against directory paths; when set, only matching directories are traversed.
+
+    Excludes always take precedence over includes.
+    Multiple patterns of the same kind are combined with logical OR.
+    """
+
+    exclude: List[re.Pattern] = field(default_factory=list)
+    include: List[re.Pattern] = field(default_factory=list)
+    exclude_dir: List[re.Pattern] = field(default_factory=list)
+    include_dir: List[re.Pattern] = field(default_factory=list)
 
 
 class GenOpsError(Exception):
@@ -593,12 +613,31 @@ def scan_huggingface_model(repo_id):
     return scan_result
 
 
-def scan_directory_path(path) -> ScanResult:
+def _matches_any(patterns: List[re.Pattern], text: str) -> bool:
+    """Return True if *text* matches at least one compiled regex in *patterns*."""
+    return any(p.search(text) for p in patterns)
+
+
+def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None) -> ScanResult:
     _log.debug(f"scan_directory_path({path})")
 
     scan_result = ScanResult([])
 
-    for base_path, _, file_names in os.walk(path):
+    for base_path, dir_names, file_names in os.walk(path):
+        # --- directory filtering (prune in-place so os.walk skips them) ---
+        if scan_filter is not None:
+            filtered_dirs = []
+            for d in dir_names:
+                dir_path = os.path.join(base_path, d)
+                if _matches_any(scan_filter.exclude_dir, dir_path):
+                    _log.debug("Excluding directory %s (matched --exclude-dir)", dir_path)
+                    continue
+                if scan_filter.include_dir and not _matches_any(scan_filter.include_dir, dir_path):
+                    _log.debug("Skipping directory %s (no --include-dir match)", dir_path)
+                    continue
+                filtered_dirs.append(d)
+            dir_names[:] = filtered_dirs
+
         for file_name in file_names:
             file_ext = os.path.splitext(file_name)[1]
             if (
@@ -608,6 +647,16 @@ def scan_directory_path(path) -> ScanResult:
             ):
                 continue
             file_path = os.path.join(base_path, file_name)
+
+            # --- file filtering ---
+            if scan_filter is not None:
+                if _matches_any(scan_filter.exclude, file_path):
+                    _log.debug("Excluding file %s (matched --exclude)", file_path)
+                    continue
+                if scan_filter.include and not _matches_any(scan_filter.include, file_path):
+                    _log.debug("Skipping file %s (no --include match)", file_path)
+                    continue
+
             _log.debug("Scanning file %s", file_path)
             with open(file_path, "rb") as file:
                 scan_result.merge(scan_bytes(file, file_path, file_ext))

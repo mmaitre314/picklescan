@@ -3,6 +3,7 @@ import importlib
 import io
 import os
 import pickle
+import re
 import sys
 from typing import Union
 from unittest import TestCase
@@ -14,6 +15,7 @@ from picklescan.cli import main
 from picklescan.scanner import (
     Global,
     SafetyLevel,
+    ScanFilter,
     ScanResult,
     _http_get,
     _list_globals,
@@ -586,3 +588,95 @@ def test_not_a_pickle_file():
     # File is not a valid pickle, but scanner should not error - just report no threats
     not_a_pickle = ScanResult([], scanned_files=1, issues_count=0, infected_files=0, scan_err=False)
     compare_scan_results(scan_file_path(f"{_root_path}/data/not_a_pickle.bin"), not_a_pickle)
+
+
+# ---------------------------------------------------------------------------
+# Tests for scan_directory_path with ScanFilter (--include/--exclude support)
+# ---------------------------------------------------------------------------
+
+
+def test_scan_directory_exclude_file():
+    """--exclude skips files whose full path matches the regex."""
+    # Exclude all .zip files – only .pkl/.pickle/.pt/.bin/.7z remain
+    sf = ScanFilter(exclude=[re.compile(r"\.zip$")])
+    sr = scan_directory_path(f"{_root_path}/data/", scan_filter=sf)
+    # No .zip file should have been scanned
+    assert sr.scanned_files > 0
+    # The unfiltered scan has 44 scanned files (from test_scan_directory_path);
+    # we just verify that some files were dropped.
+    unfiltered = scan_directory_path(f"{_root_path}/data/")
+    assert sr.scanned_files < unfiltered.scanned_files
+
+
+def test_scan_directory_include_file():
+    """--include restricts scans to files whose path matches the regex."""
+    # Only scan benign .pkl files
+    sf = ScanFilter(include=[re.compile(r"benign0_v3\.pkl$")])
+    sr = scan_directory_path(f"{_root_path}/data/", scan_filter=sf)
+    assert sr.scanned_files == 1
+    assert sr.issues_count == 0
+
+
+def test_scan_directory_exclude_wins_over_include():
+    """Excludes always take precedence over includes (ClamAV semantics)."""
+    sf = ScanFilter(
+        include=[re.compile(r"benign0_v3\.pkl$")],
+        exclude=[re.compile(r"benign")],
+    )
+    sr = scan_directory_path(f"{_root_path}/data/", scan_filter=sf)
+    assert sr.scanned_files == 0
+
+
+def test_scan_directory_exclude_dir():
+    """--exclude-dir prevents traversal into matching directories."""
+    # Scanning the parent tests/ directory but excluding 'data2'
+    sf = ScanFilter(exclude_dir=[re.compile(r"data2")])
+    sr = scan_directory_path(f"{_root_path}/", scan_filter=sf)
+    # Should still find files in data/ but none from data2/
+    assert sr.scanned_files > 0
+    # Compare with an include_dir that only allows data/
+    sf2 = ScanFilter(include_dir=[re.compile(r"/data$")])
+    sr2 = scan_directory_path(f"{_root_path}/", scan_filter=sf2)
+    assert sr2.scanned_files > 0
+    # Both should give the same set of scanned files (only data/)
+    assert sr.scanned_files == sr2.scanned_files
+
+
+def test_scan_directory_include_dir():
+    """--include-dir restricts which directories are traversed."""
+    # Only descend into data2/
+    sf = ScanFilter(include_dir=[re.compile(r"data2")])
+    sr = scan_directory_path(f"{_root_path}/", scan_filter=sf)
+    assert sr.scanned_files > 0
+
+    # Verify data/ files are NOT included by scanning only data/ and comparing
+    sf_data_only = ScanFilter(include_dir=[re.compile(r"/data$")])
+    sr_data = scan_directory_path(f"{_root_path}/", scan_filter=sf_data_only)
+    # data2 results should differ from data-only results
+    assert sr.scanned_files != sr_data.scanned_files
+
+
+def test_scan_directory_multiple_patterns():
+    """Multiple patterns of the same kind are combined with logical OR."""
+    sf = ScanFilter(
+        include=[re.compile(r"benign0_v3\.pkl$"), re.compile(r"benign0_v4\.pkl$")],
+    )
+    sr = scan_directory_path(f"{_root_path}/data/", scan_filter=sf)
+    assert sr.scanned_files == 2
+    assert sr.issues_count == 0
+
+
+def test_scan_directory_no_filter():
+    """Passing no filter (None) gives the same result as default behaviour."""
+    sr_none = scan_directory_path(f"{_root_path}/data/", scan_filter=None)
+    sr_default = scan_directory_path(f"{_root_path}/data/")
+    assert sr_none.scanned_files == sr_default.scanned_files
+    assert sr_none.issues_count == sr_default.issues_count
+
+
+def test_scan_directory_empty_filter():
+    """An empty ScanFilter (no patterns) behaves like no filter at all."""
+    sf = ScanFilter()
+    sr = scan_directory_path(f"{_root_path}/data/", scan_filter=sf)
+    sr_default = scan_directory_path(f"{_root_path}/data/")
+    assert sr.scanned_files == sr_default.scanned_files
