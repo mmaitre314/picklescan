@@ -40,10 +40,36 @@ picklescan --url https://huggingface.co/sshleifer/tiny-distilbert-base-cased-dis
 
 To scan Numpy's `.npy` files, pip install the `numpy` package first.
 
+## Usage
+
+### Exit codes
+
 The scanner exit status codes are (a-la [ClamAV](https://www.clamav.net/)):
 - `0`: scan did not find malware
 - `1`: scan found malware
 - `2`: scan failed
+
+### Filtering files and directories
+
+When scanning directories, files and subdirectories can be filtered using regular expressions (again modeled after ClamAV). Each option can be specified multiple times:
+
+| Option | Description |
+|---|---|
+| `--exclude=REGEX` | Don't scan files whose path matches the regex |
+| `--include=REGEX` | Only scan files whose path matches the regex |
+| `--exclude-dir=REGEX` | Don't descend into directories whose path matches the regex |
+| `--include-dir=REGEX` | Only descend into directories whose path matches the regex |
+
+Key behaviors:
+- **Excludes always win over includes.** A file or directory matching both an exclude and an include pattern is skipped.
+- **Multiple patterns OR together.** A file is included if it matches *any* `--include` pattern.
+- **No includes = everything eligible.** Include patterns only narrow the scan when specified.
+- **`--exclude-dir` prunes traversal.** The directory and all of its contents are skipped entirely.
+
+```bash
+# Only scan .pkl files, skip the cache/ subdirectory
+picklescan --path models/ --include='\.pkl$' --exclude-dir='cache'
+```
 
 ## Develop
 
