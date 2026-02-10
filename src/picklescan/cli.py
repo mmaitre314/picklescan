@@ -1,9 +1,10 @@
 import argparse
 import logging
 import os
+import re
 import sys
 
-from .scanner import ScanResult, scan_directory_path
+from .scanner import ScanFilter, ScanResult, scan_directory_path
 from .scanner import scan_file_path
 from .scanner import scan_url
 from .scanner import scan_huggingface_model
@@ -41,6 +42,36 @@ def main():
     parser.add_argument("-g", "--globals", help="list all globals found", action="store_true")
     parser.set_defaults(globals=False)
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help="Don't scan file names matching regular expression. Can be used multiple times.",
+    )
+    parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help="Only scan file names matching regular expression. Can be used multiple times.",
+    )
+    parser.add_argument(
+        "--exclude-dir",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        dest="exclude_dir",
+        help="Don't scan directory names matching regular expression. Can be used multiple times.",
+    )
+    parser.add_argument(
+        "--include-dir",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        dest="include_dir",
+        help="Only scan directory names matching regular expression. Can be used multiple times.",
+    )
+    parser.add_argument(
         "-l",
         "--log",
         help="level of log messages to display (default: INFO)",
@@ -53,13 +84,20 @@ def main():
     if "log_level" in args and args.log_level is not None:
         _log.setLevel(getattr(logging, args.log_level))
 
+    scan_filter = ScanFilter(
+        exclude=[re.compile(p) for p in args.exclude],
+        include=[re.compile(p) for p in args.include],
+        exclude_dir=[re.compile(p) for p in args.exclude_dir],
+        include_dir=[re.compile(p) for p in args.include_dir],
+    )
+
     try:
         if args.path is not None:
             path = os.path.abspath(args.path)
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Path {path} does not exist")
             if os.path.isdir(path):
-                scan_result = scan_directory_path(path)
+                scan_result = scan_directory_path(path, scan_filter=scan_filter)
             else:
                 scan_result = scan_file_path(path)
         elif args.url is not None:
