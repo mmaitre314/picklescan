@@ -374,6 +374,39 @@ def reduce_urllib_request_urlopen():
     return urllib.request.urlopen, ("https://example.invalid",)
 
 
+def initialize_pytorch_magic_bypass_file(path: str):
+    """Create a legacy PyTorch-format file where the magic number is produced
+    via eval/__reduce__ (bypass of get_magic_number) and a subsequent pickle
+    contains a malicious os.system payload.
+    """
+    if os.path.exists(path):
+        print(f"File {path} already exists, skipping initialization.")
+        return
+
+    class MagicBypass:
+        def __reduce__(self):
+            return (eval, ("0x1950A86A20F9469CFC6C",))
+
+    class MaliciousPayload:
+        def __reduce__(self):
+            return (os.system, ("echo pwned",))
+
+    with open(path, "wb") as f:
+        # Pickle 1: magic number via eval (bypass)
+        pickle.dump(MagicBypass(), f, protocol=2)
+        # Pickle 2: protocol version (normal)
+        pickle.dump(1001, f, protocol=2)
+        # Pickle 3: sys_info (normal)
+        pickle.dump({}, f, protocol=2)
+        # Pickle 4: storage keys (normal)
+        pickle.dump([], f, protocol=2)
+        # Pickle 5: malicious payload
+        pickle.dump(MaliciousPayload(), f, protocol=2)
+        # Pickle 6: padding
+        pickle.dump(None, f, protocol=2)
+    print(f"Initialized file {path}.")
+
+
 def initialize_codetype_exploit_file(path: str):
     if os.path.exists(path):
         print(f"File {path} already exists, skipping initialization.")
@@ -838,6 +871,9 @@ def initialize_pickle_files():
 
     # Fake PyTorch file (PNG file format) simulating https://huggingface.co/RectalWorm/loras_new/blob/main/Owl_Mage_no_background.pt
     initialize_data_file(f"{_root_path}/data/bad_pytorch.pt", b"\211PNG\r\n\032\n")
+
+    # Legacy PyTorch file with magic number bypass via eval/__reduce__
+    initialize_pytorch_magic_bypass_file(f"{_root_path}/data/pytorch_magic_bypass.pt")
 
     initialize_pickle_file(f"{_root_path}/data2/malicious21.pkl", Malicious21(), 4)
     initialize_pickle_file(f"{_root_path}/data2/malicious22.pkl", Malicious22(), 4)
