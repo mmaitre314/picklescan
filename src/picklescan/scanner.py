@@ -559,10 +559,26 @@ def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
 
         magic = get_magic_number(data)
         if magic != MAGIC_NUMBER:
-            raise InvalidMagicError(magic, MAGIC_NUMBER, file_id)
+            # Magic number doesn't match or can't be extracted (None).
+            # This could be a bypass attempt where the magic number is
+            # embedded via __reduce__ (e.g., eval('MAGIC_NUMBER')) instead
+            # of a literal INT/LONG. Scan the first pickle to check for
+            # dangerous globals -- a legitimate magic pickle contains only
+            # a simple integer and should have zero globals.
+            data.seek(0)
+            first_pickle_result = scan_pickle_bytes(data, file_id, multiple_pickles=False)
+            if first_pickle_result.globals:
+                _log.debug(
+                    f"Potential PyTorch magic number bypass detected in {file_id}. Ignoring magic number and treating file as a pickle."
+                )
+                scan_result.merge(first_pickle_result)
+            else:
+                raise InvalidMagicError(magic, MAGIC_NUMBER, file_id)
+
         for _ in range(5):
             scan_result.merge(scan_pickle_bytes(data, file_id, multiple_pickles=False))
         scan_result.scanned_files = 1
+        scan_result.infected_files = min(1, scan_result.infected_files)
         return scan_result
 
 

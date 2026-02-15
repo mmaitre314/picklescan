@@ -211,6 +211,23 @@ def test_scan_pytorch():
     with open(f"{_root_path}/data/new_pytorch_model.bin", "rb") as f:
         compare_scan_results(scan_pytorch(io.BytesIO(f.read()), "pytorch_model.bin"), scan_result)
 
+    # Legacy PyTorch file with magic number bypass via eval/__reduce__
+    # The magic number is produced dynamically via eval('0x1950A86A20F9469CFC6C')
+    # instead of a literal INT/LONG, bypassing get_magic_number().
+    # The scanner should detect both the eval in the magic pickle and the
+    # os.system in the malicious payload pickle.
+    magic_bypass_result = ScanResult(
+        [
+            Global("__builtin__", "eval", SafetyLevel.Dangerous),
+            Global("posix", "system", SafetyLevel.Dangerous),
+        ],
+        1,
+        2,
+        1,
+    )
+    with open(f"{_root_path}/data/pytorch_magic_bypass.pt", "rb") as f:
+        compare_scan_results(scan_pytorch(io.BytesIO(f.read()), "pytorch_magic_bypass.pt"), magic_bypass_result)
+
 
 def test_scan_file_path():
     safe = ScanResult([], 1, 0, 0)
@@ -293,6 +310,20 @@ def test_scan_file_path():
     # and report it as scanned (scanned_files=1) but without errors (scan_err=False) since no threats were found
     bad_pytorch = ScanResult([], 1, 0, 0, False)
     compare_scan_results(scan_file_path(f"{_root_path}/data/bad_pytorch.pt"), bad_pytorch)
+
+    # Legacy PyTorch file with magic number bypass via eval/__reduce__
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data/pytorch_magic_bypass.pt"),
+        ScanResult(
+            [
+                Global("__builtin__", "eval", SafetyLevel.Dangerous),
+                Global("posix", "system", SafetyLevel.Dangerous),
+            ],
+            1,
+            2,
+            1,
+        ),
+    )
 
     malicious14 = ScanResult([Global("runpy", "_run_code", SafetyLevel.Dangerous)], 1, 1, 1)
     compare_scan_results(scan_file_path(f"{_root_path}/data/malicious14.pkl"), malicious14)
@@ -527,10 +558,13 @@ def test_scan_directory_path():
             Global("builtins", "eval", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
             Global("builtins", "eval", SafetyLevel.Dangerous),
+            # pytorch_magic_bypass.pt: magic number bypass via eval + malicious os.system payload
+            Global("__builtin__", "eval", SafetyLevel.Dangerous),
+            Global("posix", "system", SafetyLevel.Dangerous),
         ],
-        scanned_files=44,
-        issues_count=43,
-        infected_files=37,
+        scanned_files=45,
+        issues_count=45,
+        infected_files=38,
         # scan_err=True because some files (broken_model.pkl, malicious-invalid-bytes.pkl) have partial parsing errors
         scan_err=True,
     )
