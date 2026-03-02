@@ -305,6 +305,12 @@ def reduce_GHSA_49gj_c84q_6qm9():
     return cProfile.run, (_payload,)
 
 
+def reduce_GHSA_7wx9_6375_f5wh():
+    import profile
+
+    return profile.run, (_payload,)
+
+
 def reduce_logging_FileHandler():
     from logging import FileHandler
 
@@ -922,6 +928,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-fqq6-7vqf-w3fg.pkl", reduce_GHSA_fqq6_7vqf_w3fg)
     initialize_pickle_file_from_reduce("GHSA-9w88-8rmg-7g2p.pkl", reduce_GHSA_9w88_8rmg_7g2p)
     initialize_pickle_file_from_reduce("GHSA-49gj-c84q-6qm9.pkl", reduce_GHSA_49gj_c84q_6qm9)
+    initialize_pickle_file_from_reduce("GHSA-7wx9-6375-f5wh.pkl", reduce_GHSA_7wx9_6375_f5wh)
     initialize_pickle_file_from_reduce("GHSA-q77w-mwjj-7mqx.pkl", reduce_GHSA_q77w_mwjj_7mqx)
     initialize_pickle_file_from_reduce("GHSA-jgw4-cr84-mqxg.bin", reduce_GHSA_q77w_mwjj_7mqx)
     initialize_pickle_file_from_reduce("GHSA-m273-6v24-x4m4.pkl", reduce_GHSA_m273_6v24_x4m4)

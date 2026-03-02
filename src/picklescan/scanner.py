@@ -180,7 +180,7 @@ _unsafe_globals = {
     "subprocess": "*",
     "sys": "*",
     "code": {"InteractiveInterpreter.runcode"},
-    "cProfile": {"runctx", "run"},
+    "cProfile": "*",  # cProfile.run() and cProfile.runctx() call exec() on arbitrary strings
     "distutils.file_util": "*",  # arbitrary file write via distutils.file_util.write_file()
     "doctest": {"debug_script"},
     "ensurepip": {"_run_pip"},
@@ -196,7 +196,7 @@ _unsafe_globals = {
     "_pickle": "*",
     "pip": "*",
     "pty": "*",  # pty.spawn() allows executing arbitrary commands
-    "profile": {"Profile.run", "Profile.runctx"},
+    "profile": "*",  # profile.run() and profile.runctx() call exec() on arbitrary strings
     "pydoc": "*",  # pydoc.locate can import arbitrary modules, pydoc.pipepager allows command execution
     "timeit": "*",
     "torch._dynamo.guards": {"GuardBuilder.get"},

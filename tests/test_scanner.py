@@ -404,6 +404,7 @@ def test_scan_file_path():
     assert_scan("GHSA-fqq6-7vqf-w3fg.pkl", [Global("doctest", "debug_script", SafetyLevel.Dangerous)])
     assert_scan("GHSA-9w88-8rmg-7g2p.pkl", [Global("cProfile", "runctx", SafetyLevel.Dangerous)])
     assert_scan("GHSA-49gj-c84q-6qm9.pkl", [Global("cProfile", "run", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-7wx9-6375-f5wh.pkl", [Global("profile", "run", SafetyLevel.Dangerous)])
     assert_scan("GHSA-q77w-mwjj-7mqx.pkl", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
     assert_scan("GHSA-jgw4-cr84-mqxg.bin", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
     assert_scan("GHSA-m273-6v24-x4m4.pkl", [Global("distutils.file_util", "write_file", SafetyLevel.Dangerous)])
