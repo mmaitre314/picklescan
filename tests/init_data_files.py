@@ -374,6 +374,30 @@ def reduce_GHSA_r8g5_cgf2_4m4m():
     return getlincoef, (_payload, [])
 
 
+def reduce_GHSA_g38g_8gr9_h9xp_uuid():
+    import uuid
+
+    return uuid._get_command_stdout, ("id",)
+
+
+def reduce_GHSA_g38g_8gr9_h9xp_osx_support():
+    import _osx_support
+
+    return _osx_support._read_output, ("id",)
+
+
+def reduce_GHSA_g38g_8gr9_h9xp_aix_support():
+    import _aix_support
+
+    return _aix_support._read_cmd_output, ("id",)
+
+
+def reduce_GHSA_g38g_8gr9_h9xp_imaplib():
+    import imaplib
+
+    return imaplib.IMAP4_stream, ("id",)
+
+
 def reduce_io_FileIO():
     import io
 
@@ -946,6 +970,45 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("urllib_request_urlopen.pkl", reduce_urllib_request_urlopen)
     initialize_pickle_file_from_reduce("logging_FileHandler.pkl", reduce_logging_FileHandler)
     initialize_pickle_file_from_reduce("GHSA-vvpj-8cmc-gx39.pkl", reduce_GHSA_vvpj_8cmc_gx39)
+    initialize_pickle_file_from_reduce("GHSA-g38g-8gr9-h9xp-uuid.pkl", reduce_GHSA_g38g_8gr9_h9xp_uuid)
+    initialize_pickle_file_from_reduce("GHSA-g38g-8gr9-h9xp-osx-support.pkl", reduce_GHSA_g38g_8gr9_h9xp_osx_support)
+    initialize_pickle_file_from_reduce("GHSA-g38g-8gr9-h9xp-aix-support.pkl", reduce_GHSA_g38g_8gr9_h9xp_aix_support)
+    initialize_pickle_file_from_reduce("GHSA-g38g-8gr9-h9xp-imaplib.pkl", reduce_GHSA_g38g_8gr9_h9xp_imaplib)
+
+    # GHSA-g38g-8gr9-h9xp: raw pickle bytes for modules not available on this platform
+    # _pyrepl.pager.pipe_pager (Python 3.13+)
+    initialize_data_file(
+        f"{_root_path}/data2/GHSA-g38g-8gr9-h9xp-pyrepl-pager.pkl",
+        b"".join(
+            [
+                pickle.PROTO + b"\x04",
+                pickle.SHORT_BINUNICODE + bytes([13]) + b"_pyrepl.pager",
+                pickle.SHORT_BINUNICODE + bytes([10]) + b"pipe_pager",
+                pickle.STACK_GLOBAL,
+                pickle.SHORT_BINUNICODE + bytes([4]) + b"text",
+                pickle.SHORT_BINUNICODE + bytes([2]) + b"id",
+                pickle.TUPLE2,
+                pickle.REDUCE,
+                pickle.STOP,
+            ]
+        ),
+    )
+    # test.support.script_helper.assert_python_ok
+    initialize_data_file(
+        f"{_root_path}/data2/GHSA-g38g-8gr9-h9xp-test.pkl",
+        b"".join(
+            [
+                pickle.PROTO + b"\x04",
+                pickle.SHORT_BINUNICODE + bytes([26]) + b"test.support.script_helper",
+                pickle.SHORT_BINUNICODE + bytes([16]) + b"assert_python_ok",
+                pickle.STACK_GLOBAL,
+                pickle.SHORT_BINUNICODE + bytes([7]) + b"-c pass",
+                pickle.TUPLE1,
+                pickle.REDUCE,
+                pickle.STOP,
+            ]
+        ),
+    )
 
     initialize_cloudpickle_exploit_file(f"{_root_path}/data2/cloudpickle_codeinjection.pkl")
     initialize_codetype_exploit_file(f"{_root_path}/data2/types_CodeType.pkl")

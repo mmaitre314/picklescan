@@ -448,6 +448,16 @@ def test_scan_file_path():
             Global("cloudpickle.cloudpickle", "subimport", SafetyLevel.Dangerous),
         ],
     )
+    # GHSA-g38g-8gr9-h9xp: Multiple stdlib modules with direct RCE not in blocklist
+    assert_scan("GHSA-g38g-8gr9-h9xp-uuid.pkl", [Global("uuid", "_get_command_stdout", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-g38g-8gr9-h9xp-osx-support.pkl", [Global("_osx_support", "_read_output", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-g38g-8gr9-h9xp-aix-support.pkl", [Global("_aix_support", "_read_cmd_output", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-g38g-8gr9-h9xp-imaplib.pkl", [Global("imaplib", "IMAP4_stream", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-g38g-8gr9-h9xp-pyrepl-pager.pkl", [Global("_pyrepl.pager", "pipe_pager", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-g38g-8gr9-h9xp-test.pkl",
+        [Global("test.support.script_helper", "assert_python_ok", SafetyLevel.Dangerous)],
+    )
 
 
 def test_scan_file_path_npz():
