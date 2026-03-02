@@ -275,6 +275,12 @@ def reduce_GHSA_p9w7_82w4_7q8m():
     return ParserGenerator.make_label, (None, {}, '""+' + _payload)
 
 
+def reduce_GHSA_vvpj_8cmc_gx39():
+    import pkgutil
+
+    return pkgutil.resolve_name, ("os:system",)
+
+
 def reduce_GHSA_m869_42cg_3xwr():
     from idlelib.run import Executive
 
@@ -939,6 +945,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("io_FileIO.pkl", reduce_io_FileIO)
     initialize_pickle_file_from_reduce("urllib_request_urlopen.pkl", reduce_urllib_request_urlopen)
     initialize_pickle_file_from_reduce("logging_FileHandler.pkl", reduce_logging_FileHandler)
+    initialize_pickle_file_from_reduce("GHSA-vvpj-8cmc-gx39.pkl", reduce_GHSA_vvpj_8cmc_gx39)
 
     initialize_cloudpickle_exploit_file(f"{_root_path}/data2/cloudpickle_codeinjection.pkl")
     initialize_codetype_exploit_file(f"{_root_path}/data2/types_CodeType.pkl")

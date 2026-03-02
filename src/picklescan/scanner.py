@@ -195,6 +195,7 @@ _unsafe_globals = {
     "pickle": "*",
     "_pickle": "*",
     "pip": "*",
+    "pkgutil": {"resolve_name"},  # pkgutil.resolve_name can resolve any module:attribute, bypassing the entire blocklist
     "pty": "*",  # pty.spawn() allows executing arbitrary commands
     "profile": "*",  # profile.run() and profile.runctx() call exec() on arbitrary strings
     "pydoc": "*",  # pydoc.locate can import arbitrary modules, pydoc.pipepager allows command execution
