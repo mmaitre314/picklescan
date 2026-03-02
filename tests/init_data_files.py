@@ -275,6 +275,12 @@ def reduce_GHSA_p9w7_82w4_7q8m():
     return ParserGenerator.make_label, (None, {}, '""+' + _payload)
 
 
+def reduce_GHSA_vvpj_8cmc_gx39():
+    import pkgutil
+
+    return pkgutil.resolve_name, ("os:system",)
+
+
 def reduce_GHSA_m869_42cg_3xwr():
     from idlelib.run import Executive
 
@@ -303,6 +309,12 @@ def reduce_GHSA_9w88_8rmg_7g2p():
 
 def reduce_GHSA_49gj_c84q_6qm9():
     return cProfile.run, (_payload,)
+
+
+def reduce_GHSA_7wx9_6375_f5wh():
+    import profile
+
+    return profile.run, (_payload,)
 
 
 def reduce_logging_FileHandler():
@@ -360,6 +372,30 @@ def reduce_GHSA_r8g5_cgf2_4m4m():
     from numpy.f2py.crackfortran import getlincoef
 
     return getlincoef, (_payload, [])
+
+
+def reduce_GHSA_g38g_8gr9_h9xp_uuid():
+    import uuid
+
+    return uuid._get_command_stdout, ("id",)
+
+
+def reduce_GHSA_g38g_8gr9_h9xp_osx_support():
+    import _osx_support
+
+    return _osx_support._read_output, ("id",)
+
+
+def reduce_GHSA_g38g_8gr9_h9xp_aix_support():
+    import _aix_support
+
+    return _aix_support._read_cmd_output, ("id",)
+
+
+def reduce_GHSA_g38g_8gr9_h9xp_imaplib():
+    import imaplib
+
+    return imaplib.IMAP4_stream, ("id",)
 
 
 def reduce_io_FileIO():
@@ -922,6 +958,7 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("GHSA-fqq6-7vqf-w3fg.pkl", reduce_GHSA_fqq6_7vqf_w3fg)
     initialize_pickle_file_from_reduce("GHSA-9w88-8rmg-7g2p.pkl", reduce_GHSA_9w88_8rmg_7g2p)
     initialize_pickle_file_from_reduce("GHSA-49gj-c84q-6qm9.pkl", reduce_GHSA_49gj_c84q_6qm9)
+    initialize_pickle_file_from_reduce("GHSA-7wx9-6375-f5wh.pkl", reduce_GHSA_7wx9_6375_f5wh)
     initialize_pickle_file_from_reduce("GHSA-q77w-mwjj-7mqx.pkl", reduce_GHSA_q77w_mwjj_7mqx)
     initialize_pickle_file_from_reduce("GHSA-jgw4-cr84-mqxg.bin", reduce_GHSA_q77w_mwjj_7mqx)
     initialize_pickle_file_from_reduce("GHSA-m273-6v24-x4m4.pkl", reduce_GHSA_m273_6v24_x4m4)
@@ -932,6 +969,46 @@ def initialize_pickle_files():
     initialize_pickle_file_from_reduce("io_FileIO.pkl", reduce_io_FileIO)
     initialize_pickle_file_from_reduce("urllib_request_urlopen.pkl", reduce_urllib_request_urlopen)
     initialize_pickle_file_from_reduce("logging_FileHandler.pkl", reduce_logging_FileHandler)
+    initialize_pickle_file_from_reduce("GHSA-vvpj-8cmc-gx39.pkl", reduce_GHSA_vvpj_8cmc_gx39)
+    initialize_pickle_file_from_reduce("GHSA-g38g-8gr9-h9xp-uuid.pkl", reduce_GHSA_g38g_8gr9_h9xp_uuid)
+    initialize_pickle_file_from_reduce("GHSA-g38g-8gr9-h9xp-osx-support.pkl", reduce_GHSA_g38g_8gr9_h9xp_osx_support)
+    initialize_pickle_file_from_reduce("GHSA-g38g-8gr9-h9xp-aix-support.pkl", reduce_GHSA_g38g_8gr9_h9xp_aix_support)
+    initialize_pickle_file_from_reduce("GHSA-g38g-8gr9-h9xp-imaplib.pkl", reduce_GHSA_g38g_8gr9_h9xp_imaplib)
+
+    # GHSA-g38g-8gr9-h9xp: raw pickle bytes for modules not available on this platform
+    # _pyrepl.pager.pipe_pager (Python 3.13+)
+    initialize_data_file(
+        f"{_root_path}/data2/GHSA-g38g-8gr9-h9xp-pyrepl-pager.pkl",
+        b"".join(
+            [
+                pickle.PROTO + b"\x04",
+                pickle.SHORT_BINUNICODE + bytes([13]) + b"_pyrepl.pager",
+                pickle.SHORT_BINUNICODE + bytes([10]) + b"pipe_pager",
+                pickle.STACK_GLOBAL,
+                pickle.SHORT_BINUNICODE + bytes([4]) + b"text",
+                pickle.SHORT_BINUNICODE + bytes([2]) + b"id",
+                pickle.TUPLE2,
+                pickle.REDUCE,
+                pickle.STOP,
+            ]
+        ),
+    )
+    # test.support.script_helper.assert_python_ok
+    initialize_data_file(
+        f"{_root_path}/data2/GHSA-g38g-8gr9-h9xp-test.pkl",
+        b"".join(
+            [
+                pickle.PROTO + b"\x04",
+                pickle.SHORT_BINUNICODE + bytes([26]) + b"test.support.script_helper",
+                pickle.SHORT_BINUNICODE + bytes([16]) + b"assert_python_ok",
+                pickle.STACK_GLOBAL,
+                pickle.SHORT_BINUNICODE + bytes([7]) + b"-c pass",
+                pickle.TUPLE1,
+                pickle.REDUCE,
+                pickle.STOP,
+            ]
+        ),
+    )
 
     initialize_cloudpickle_exploit_file(f"{_root_path}/data2/cloudpickle_codeinjection.pkl")
     initialize_codetype_exploit_file(f"{_root_path}/data2/types_CodeType.pkl")

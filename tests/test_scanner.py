@@ -404,6 +404,7 @@ def test_scan_file_path():
     assert_scan("GHSA-fqq6-7vqf-w3fg.pkl", [Global("doctest", "debug_script", SafetyLevel.Dangerous)])
     assert_scan("GHSA-9w88-8rmg-7g2p.pkl", [Global("cProfile", "runctx", SafetyLevel.Dangerous)])
     assert_scan("GHSA-49gj-c84q-6qm9.pkl", [Global("cProfile", "run", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-7wx9-6375-f5wh.pkl", [Global("profile", "run", SafetyLevel.Dangerous)])
     assert_scan("GHSA-q77w-mwjj-7mqx.pkl", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
     assert_scan("GHSA-jgw4-cr84-mqxg.bin", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
     assert_scan("GHSA-m273-6v24-x4m4.pkl", [Global("distutils.file_util", "write_file", SafetyLevel.Dangerous)])
@@ -432,6 +433,7 @@ def test_scan_file_path():
     assert_scan("urllib_request_urlopen.pkl", [Global("urllib.request", "urlopen", SafetyLevel.Dangerous)])
     # logging.FileHandler can create arbitrary files on the filesystem
     assert_scan("logging_FileHandler.pkl", [Global("logging", "FileHandler", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-vvpj-8cmc-gx39.pkl", [Global("pkgutil", "resolve_name", SafetyLevel.Dangerous)])
     # types.CodeType can construct arbitrary code objects for execution
     assert_scan("types_CodeType.pkl", [Global("types", "CodeType", SafetyLevel.Dangerous)])
     # cloudpickle uses _make_function and _builtin_type with CodeType to reconstruct arbitrary callables
@@ -445,6 +447,16 @@ def test_scan_file_path():
             Global("cloudpickle.cloudpickle", "_make_empty_cell", SafetyLevel.Dangerous),
             Global("cloudpickle.cloudpickle", "subimport", SafetyLevel.Dangerous),
         ],
+    )
+    # GHSA-g38g-8gr9-h9xp: Multiple stdlib modules with direct RCE not in blocklist
+    assert_scan("GHSA-g38g-8gr9-h9xp-uuid.pkl", [Global("uuid", "_get_command_stdout", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-g38g-8gr9-h9xp-osx-support.pkl", [Global("_osx_support", "_read_output", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-g38g-8gr9-h9xp-aix-support.pkl", [Global("_aix_support", "_read_cmd_output", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-g38g-8gr9-h9xp-imaplib.pkl", [Global("imaplib", "IMAP4_stream", SafetyLevel.Dangerous)])
+    assert_scan("GHSA-g38g-8gr9-h9xp-pyrepl-pager.pkl", [Global("_pyrepl.pager", "pipe_pager", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-g38g-8gr9-h9xp-test.pkl",
+        [Global("test.support.script_helper", "assert_python_ok", SafetyLevel.Dangerous)],
     )
 
 

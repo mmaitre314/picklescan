@@ -180,7 +180,7 @@ _unsafe_globals = {
     "subprocess": "*",
     "sys": "*",
     "code": {"InteractiveInterpreter.runcode"},
-    "cProfile": {"runctx", "run"},
+    "cProfile": "*",  # cProfile.run() and cProfile.runctx() call exec() on arbitrary strings
     "distutils.file_util": "*",  # arbitrary file write via distutils.file_util.write_file()
     "doctest": {"debug_script"},
     "ensurepip": {"_run_pip"},
@@ -189,15 +189,18 @@ _unsafe_globals = {
     "idlelib.debugobj": {"ObjectTreeItem.SetText"},
     "idlelib.pyshell": {"ModifiedInterpreter.runcode", "ModifiedInterpreter.runcommand"},
     "idlelib.run": {"Executive.runcode"},
+    "imaplib": {"IMAP4_stream"},  # IMAP4_stream executes commands via subprocess.Popen(command, shell=True)
     "lib2to3.pgen2.grammar": {"Grammar.loads"},
     "lib2to3.pgen2.pgen": {"ParserGenerator.make_label"},
     "pdb": "*",
     "pickle": "*",
     "_pickle": "*",
     "pip": "*",
+    "pkgutil": {"resolve_name"},  # pkgutil.resolve_name can resolve any module:attribute, bypassing the entire blocklist
     "pty": "*",  # pty.spawn() allows executing arbitrary commands
-    "profile": {"Profile.run", "Profile.runctx"},
+    "profile": "*",  # profile.run() and profile.runctx() call exec() on arbitrary strings
     "pydoc": "*",  # pydoc.locate can import arbitrary modules, pydoc.pipepager allows command execution
+    "test": "*",  # test.support.script_helper.assert_python_ok spawns arbitrary python subprocesses
     "timeit": "*",
     "torch._dynamo.guards": {"GuardBuilder.get"},
     "torch._inductor.codecache": "compile_file",  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
@@ -214,8 +217,12 @@ _unsafe_globals = {
     },  # allows storing a pickle inside a pickle (if this has valid use cases, scan the input bytes instead of flagging the global)
     "trace": {"Trace.run", "Trace.runctx"},
     "urllib.request": "*",  # urllib.request.urlopen can be used for SSRF and data exfiltration
+    "uuid": "*",  # uuid._get_command_stdout executes arbitrary commands via subprocess.Popen
     "venv": "*",
     "webbrowser": "*",  # Includes webbrowser.open()
+    "_osx_support": "*",  # _read_output and _find_build_tool execute commands via os.system
+    "_aix_support": "*",  # _read_cmd_output executes commands via os.system
+    "_pyrepl": "*",  # _pyrepl.pager.pipe_pager/tempfile_pager execute commands via subprocess/os.system
 }
 
 #
