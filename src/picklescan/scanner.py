@@ -281,7 +281,7 @@ def _http_get(url) -> bytes:
     parsed_url = urllib.parse.urlparse(url)
     path_and_query = parsed_url.path + ("?" + parsed_url.query if len(parsed_url.query) > 0 else "")
 
-    conn = http.client.HTTPSConnection(parsed_url.netloc)
+    conn = http.client.HTTPSConnection(parsed_url.netloc, timeout=30)
     try:
         conn.request("GET", path_and_query)
         response = conn.getresponse()
