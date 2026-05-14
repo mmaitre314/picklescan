@@ -1,3 +1,4 @@
+import gzip
 import http.client
 import importlib
 import io
@@ -149,6 +150,37 @@ def test_scan_zip_bytes():
 
     assert scan_zip_bytes(io.BytesIO(buffer.getbuffer()), "test.zip") == ScanResult(
         [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+
+
+def test_scan_compressed_joblib_file_path(tmp_path):
+    file_path = tmp_path / "model.joblib.gz"
+    file_path.write_bytes(gzip.compress(pickle.dumps(Malicious2(), protocol=4)))
+
+    compare_scan_results(
+        scan_file_path(str(file_path)),
+        ScanResult([Global(os.name, "system", SafetyLevel.Dangerous)], 1, 1, 1),
+    )
+
+
+def test_scan_directory_path_includes_compressed_joblib(tmp_path):
+    file_path = tmp_path / "model.joblib.gz"
+    file_path.write_bytes(gzip.compress(pickle.dumps(Malicious2(), protocol=4)))
+
+    compare_scan_results(
+        scan_directory_path(str(tmp_path)),
+        ScanResult([Global(os.name, "system", SafetyLevel.Dangerous)], 1, 1, 1),
+    )
+
+
+def test_scan_zip_bytes_includes_compressed_joblib_member():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip:
+        zip.writestr("model.joblib.gz", gzip.compress(pickle.dumps(Malicious2(), protocol=4)))
+
+    compare_scan_results(
+        scan_zip_bytes(io.BytesIO(buffer.getbuffer()), "test.zip"),
+        ScanResult([Global(os.name, "system", SafetyLevel.Dangerous)], 1, 1, 1),
     )
 
 
