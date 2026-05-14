@@ -1,8 +1,11 @@
+import bz2
 from dataclasses import dataclass, field
 from enum import Enum
+import gzip
 import http.client
 import io
 import json
+import lzma
 import logging
 import os
 import pickletools
@@ -246,6 +249,17 @@ _numpy_file_extensions = {".npy"}  # Note: .npz is handled as zip files
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data"}
 _zip_file_extensions = {".zip", ".npz", ".7z"}
+_compressed_pickle_suffixes = {
+    ".bz2": bz2.decompress,
+    ".gz": gzip.decompress,
+    ".lzma": lzma.decompress,
+    ".xz": lzma.decompress,
+}
+_compressed_pickle_file_extensions = {
+    f"{pickle_ext}{compressed_ext}" for pickle_ext in _pickle_file_extensions for compressed_ext in _compressed_pickle_suffixes
+}
+_all_pickle_file_extensions = _pickle_file_extensions | _compressed_pickle_file_extensions
+_supported_file_extensions = _all_pickle_file_extensions | _zip_file_extensions | _pytorch_file_extensions | _numpy_file_extensions
 # Pickle files do not actually have magic bytes, but v2+ files
 # start with a PROTO (\x80) opcode followed by a byte with the protocol version
 _pickle_magic_bytes = {
@@ -257,6 +271,14 @@ _pickle_magic_bytes = {
     b"\x80\x05",
 }
 _numpy_magic_bytes = b"\x93NUMPY"
+
+
+def _get_file_extension(path: str) -> str:
+    path = str(path)
+    for file_ext in sorted(_supported_file_extensions, key=len, reverse=True):
+        if path.endswith(file_ext):
+            return file_ext
+    return os.path.splitext(path)[1]
 
 
 def _is_7z_file(f: IO[bytes]) -> bool:
@@ -431,9 +453,18 @@ def _build_scan_result_from_raw_globals(
     return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, scan_err)
 
 
-def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanResult:
+def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, file_ext: Optional[str] = None) -> ScanResult:
     """Disassemble a Pickle stream and report issues"""
     _log.debug(f"scan_pickle_bytes({file_id})")
+
+    if file_ext in _compressed_pickle_file_extensions:
+        compressed_ext = os.path.splitext(file_ext)[1]
+        decompressor = _compressed_pickle_suffixes[compressed_ext]
+        try:
+            data = io.BytesIO(decompressor(data.read()))
+        except Exception as e:
+            _log.warning("WARNING: could not decompress %s as %s: %s", file_id, compressed_ext, e)
+            return ScanResult([], scanned_files=1, scan_err=True)
 
     try:
         raw_globals = _list_globals(data, multiple_pickles)
@@ -464,7 +495,7 @@ def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
 
     with py7zr.SevenZipFile(data, mode="r") as archive:
         file_names = archive.getnames()
-        targets = [f for f in file_names if f.endswith(tuple(_pickle_file_extensions))]
+        targets = [f for f in file_names if _get_file_extension(f) in _all_pickle_file_extensions]
         _log.debug("Files in 7z archive %s: %s", file_id, targets)
         with TemporaryDirectory() as tmpdir:
             archive.extract(path=tmpdir, targets=targets)
@@ -489,12 +520,12 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
             try:
                 with zip.open(file_name, "r") as file:
                     magic_bytes = file.read(8)
-                file_ext = os.path.splitext(file_name)[1]
+                file_ext = _get_file_extension(file_name)
 
-                if file_ext in _pickle_file_extensions or any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
+                if file_ext in _all_pickle_file_extensions or any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
                     _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                     with zip.open(file_name, "r") as file:
-                        result.merge(scan_pickle_bytes(file, f"{file_id}:{file_name}"))
+                        result.merge(scan_pickle_bytes(file, f"{file_id}:{file_name}", file_ext=file_ext))
 
                 elif file_ext in _numpy_file_extensions or magic_bytes.startswith(_numpy_magic_bytes):
                     _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
@@ -612,7 +643,7 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> Scan
     elif _is_7z_file(data):
         return scan_7z_bytes(data, file_id)
     else:
-        return scan_pickle_bytes(data, file_id)
+        return scan_pickle_bytes(data, file_id, file_ext=file_ext)
 
 
 def scan_huggingface_model(repo_id):
@@ -625,8 +656,8 @@ def scan_huggingface_model(repo_id):
     # Scan model files
     scan_result = ScanResult([])
     for file_name in file_names:
-        file_ext = os.path.splitext(file_name)[1]
-        if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions and file_ext not in _pytorch_file_extensions:
+        file_ext = _get_file_extension(file_name)
+        if file_ext not in _zip_file_extensions and file_ext not in _all_pickle_file_extensions and file_ext not in _pytorch_file_extensions:
             continue
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
         url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
@@ -662,10 +693,10 @@ def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None) -> ScanR
             dir_names[:] = filtered_dirs
 
         for file_name in file_names:
-            file_ext = os.path.splitext(file_name)[1]
+            file_ext = _get_file_extension(file_name)
             if (
                 file_ext not in _zip_file_extensions
-                and file_ext not in _pickle_file_extensions
+                and file_ext not in _all_pickle_file_extensions
                 and file_ext not in _pytorch_file_extensions
             ):
                 continue
@@ -690,7 +721,7 @@ def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None) -> ScanR
 def scan_file_path(path) -> ScanResult:
     _log.debug(f"scan_file_path({path})")
 
-    file_ext = os.path.splitext(path)[1]
+    file_ext = _get_file_extension(path)
     with open(path, "rb") as file:
         return scan_bytes(file, path, file_ext)
 
