@@ -192,6 +192,7 @@ _unsafe_globals = {
     "imaplib": {"IMAP4_stream"},  # IMAP4_stream executes commands via subprocess.Popen(command, shell=True)
     "lib2to3.pgen2.grammar": {"Grammar.loads"},
     "lib2to3.pgen2.pgen": {"ParserGenerator.make_label"},
+    "mailcap": {"findmatch"},  # mailcap.findmatch executes matching entry test commands via os.system()
     "pdb": "*",
     "pickle": "*",
     "_pickle": "*",

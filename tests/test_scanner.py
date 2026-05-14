@@ -42,6 +42,14 @@ class Malicious2:
         return os.system, ("ls -la",)
 
 
+class MaliciousMailcapFindmatch:
+    def __reduce__(self):
+        import mailcap
+
+        caps = {"text/plain": [{"view": "cat %s", "test": "true"}]}
+        return mailcap.findmatch, (caps, "text/plain")
+
+
 class HTTPResponse:
     def __init__(self, status, data=None):
         self.status = status
@@ -139,6 +147,12 @@ def test_list_globals():
 def test_scan_pickle_bytes():
     assert scan_pickle_bytes(io.BytesIO(pickle.dumps(Malicious1())), "file.pkl") == ScanResult(
         [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+
+
+def test_scan_pickle_bytes_flags_mailcap_findmatch():
+    assert scan_pickle_bytes(io.BytesIO(pickle.dumps(MaliciousMailcapFindmatch())), "mailcap.pkl") == ScanResult(
+        [Global("mailcap", "findmatch", SafetyLevel.Dangerous)], 1, 1, 1
     )
 
 
