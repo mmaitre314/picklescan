@@ -42,6 +42,11 @@ def main():
     parser.add_argument("-g", "--globals", help="list all globals found", action="store_true")
     parser.set_defaults(globals=False)
     parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Promote suspicious globals to dangerous (default-deny mode)",
+    )
+    parser.add_argument(
         "--exclude",
         action="append",
         default=[],
@@ -97,13 +102,13 @@ def main():
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Path {path} does not exist")
             if os.path.isdir(path):
-                scan_result = scan_directory_path(path, scan_filter=scan_filter)
+                scan_result = scan_directory_path(path, scan_filter=scan_filter, strict=args.strict)
             else:
-                scan_result = scan_file_path(path)
+                scan_result = scan_file_path(path, strict=args.strict)
         elif args.url is not None:
-            scan_result = scan_url(args.url)
+            scan_result = scan_url(args.url, strict=args.strict)
         elif args.huggingface_model is not None:
-            scan_result = scan_huggingface_model(args.huggingface_model)
+            scan_result = scan_huggingface_model(args.huggingface_model, strict=args.strict)
         else:
             raise ValueError("Command line must include either a path, a URL, or a Hugging Face model")
 

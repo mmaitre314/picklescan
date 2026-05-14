@@ -42,6 +42,13 @@ class Malicious2:
         return os.system, ("ls -la",)
 
 
+class Suspicious:
+    def __reduce__(self):
+        import collections
+
+        return collections.Counter, ([1, 2, 3],)
+
+
 class HTTPResponse:
     def __init__(self, status, data=None):
         self.status = status
@@ -139,6 +146,19 @@ def test_list_globals():
 def test_scan_pickle_bytes():
     assert scan_pickle_bytes(io.BytesIO(pickle.dumps(Malicious1())), "file.pkl") == ScanResult(
         [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+
+
+def test_scan_pickle_bytes_strict():
+    data = io.BytesIO(pickle.dumps(Suspicious()))
+
+    assert scan_pickle_bytes(data, "file.pkl") == ScanResult(
+        [Global("collections", "Counter", SafetyLevel.Suspicious)], 1, 0, 0
+    )
+
+    data.seek(0)
+    assert scan_pickle_bytes(data, "file.pkl", strict=True) == ScanResult(
+        [Global("collections", "Counter", SafetyLevel.Dangerous)], 1, 1, 1
     )
 
 
