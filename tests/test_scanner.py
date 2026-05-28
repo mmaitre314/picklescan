@@ -458,6 +458,10 @@ def test_scan_file_path():
         "GHSA-g38g-8gr9-h9xp-test.pkl",
         [Global("test.support.script_helper", "assert_python_ok", SafetyLevel.Dangerous)],
     )
+    # importlib.import_module can dynamically import any module, bypassing the entire blocklist
+    assert_scan("importlib_bypass.pkl", [Global("importlib", "import_module", SafetyLevel.Dangerous)])
+    # marshal.loads can deserialize arbitrary code objects from bytes, enabling code execution
+    assert_scan("marshal_bypass.pkl", [Global("marshal", "loads", SafetyLevel.Dangerous)])
 
 
 def test_scan_file_path_npz():
