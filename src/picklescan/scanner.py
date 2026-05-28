@@ -190,7 +190,9 @@ _unsafe_globals = {
     "idlelib.pyshell": {"ModifiedInterpreter.runcode", "ModifiedInterpreter.runcommand"},
     "idlelib.run": {"Executive.runcode"},
     "imaplib": {"IMAP4_stream"},  # IMAP4_stream executes commands via subprocess.Popen(command, shell=True)
+    "importlib": "*",  # importlib.import_module() can dynamically import any module, bypassing the entire blocklist
     "lib2to3.pgen2.grammar": {"Grammar.loads"},
+    "marshal": "*",  # marshal.loads() can deserialize arbitrary code objects from bytes, enabling code execution
     "lib2to3.pgen2.pgen": {"ParserGenerator.make_label"},
     "pdb": "*",
     "pickle": "*",
