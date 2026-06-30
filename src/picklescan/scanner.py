@@ -184,10 +184,16 @@ _unsafe_globals = {
     "distutils.file_util": "*",  # arbitrary file write via distutils.file_util.write_file()
     "doctest": {"debug_script"},
     "ensurepip": {"_run_pip"},
-    "idlelib.autocomplete": {"AutoComplete.get_entity", "AutoComplete.fetch_completions"},
+    "idlelib.autocomplete": {
+        "AutoComplete.get_entity",
+        "AutoComplete.fetch_completions",
+    },
     "idlelib.calltip": {"Calltip.fetch_tip", "get_entity"},
     "idlelib.debugobj": {"ObjectTreeItem.SetText"},
-    "idlelib.pyshell": {"ModifiedInterpreter.runcode", "ModifiedInterpreter.runcommand"},
+    "idlelib.pyshell": {
+        "ModifiedInterpreter.runcode",
+        "ModifiedInterpreter.runcommand",
+    },
     "idlelib.run": {"Executive.runcode"},
     "imaplib": {"IMAP4_stream"},  # IMAP4_stream executes commands via subprocess.Popen(command, shell=True)
     "lib2to3.pgen2.grammar": {"Grammar.loads"},
@@ -427,7 +433,13 @@ def _build_scan_result_from_raw_globals(
             g.safety = SafetyLevel.Innocuous
         elif strict:
             g.safety = SafetyLevel.Dangerous
-            _log.warning("%s: %s import '%s %s' FOUND (promoted by --strict)", file_id, g.safety.value, g.module, g.name)
+            _log.warning(
+                "%s: %s import '%s %s' FOUND (promoted by --strict)",
+                file_id,
+                g.safety.value,
+                g.module,
+                g.name,
+            )
             issues_count += 1
         else:
             g.safety = SafetyLevel.Suspicious
@@ -445,7 +457,10 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=Fa
     except GenOpsError as e:
         if e.globals is not None:
             # Found some globals before error - could be a malicious partial pickle
-            _log.error(f"ERROR: parsing pickle in {file_id}: {e}", exc_info=_log.isEnabledFor(logging.DEBUG))
+            _log.error(
+                f"ERROR: parsing pickle in {file_id}: {e}",
+                exc_info=_log.isEnabledFor(logging.DEBUG),
+            )
             return _build_scan_result_from_raw_globals(e.globals, file_id, scan_err=True, strict=strict)
         else:
             # No globals found - likely not a pickle file at all
