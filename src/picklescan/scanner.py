@@ -43,6 +43,7 @@ class ScanResult:
     issues_count: int = 0
     infected_files: int = 0
     scan_err: bool = False
+    suspicious_count: int = 0
 
     def merge(self, sr: "ScanResult"):
         self.globals.extend(sr.globals)
@@ -50,6 +51,7 @@ class ScanResult:
         self.issues_count += sr.issues_count
         self.infected_files += sr.infected_files
         self.scan_err = self.scan_err or sr.scan_err
+        self.suspicious_count += sr.suspicious_count
 
 
 @dataclass
@@ -406,6 +408,7 @@ def _build_scan_result_from_raw_globals(
     strict=False,
 ) -> ScanResult:
     globals = []
+    suspicious_count = 0
     issues_count = 0
     for rg in raw_globals:
         g = Global(rg[0], rg[1], SafetyLevel.Dangerous)
@@ -443,9 +446,10 @@ def _build_scan_result_from_raw_globals(
             issues_count += 1
         else:
             g.safety = SafetyLevel.Suspicious
+            suspicious_count += 1
         globals.append(g)
 
-    return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, scan_err)
+    return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, scan_err, suspicious_count)
 
 
 def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=False) -> ScanResult:

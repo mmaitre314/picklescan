@@ -17,6 +17,7 @@ def print_summary(show_globals: bool, sr: ScanResult):
         f"""----------- SCAN SUMMARY -----------
 Scanned files: {sr.scanned_files}
 Infected files: {sr.infected_files}
+Suspicious globals: {sr.suspicious_count}
 Dangerous globals: {sr.issues_count}"""
     )
     if show_globals and len(sr.globals) > 0:
