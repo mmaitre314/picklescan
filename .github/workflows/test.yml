@@ -17,9 +17,33 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - name: Install packages
+      - name: Install picklescan (no extra dependencies)
         run: |
           python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: Sanity-check picklescan CLI
+        run: |
+          # picklescan is expected to work with only Python installed,
+          # before any test dependencies are pulled in.
+          picklescan --help
+
+          # A benign pickle should scan cleanly (exit code 0).
+          picklescan --path tests/data/benign0_v0.pkl
+
+          # A malicious pickle should be detected and exit with code 1.
+          set +e
+          output=$(picklescan --path tests/data/malicious0.pkl)
+          code=$?
+          set -e
+          echo "$output"
+          if [ "$code" -ne 1 ]; then
+            echo "::error::Expected exit code 1 for malicious file, got $code"
+            exit 1
+          fi
+          echo "$output" | grep -q "dangerous import '__builtin__ eval' FOUND"
+          echo "$output" | grep -q "Infected files: 1"
+      - name: Install test packages
+        run: |
           python -m pip install -r requirements.txt
           python -m pip install -e '.[7z]'
       - name: Check code format
