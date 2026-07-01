@@ -13,13 +13,11 @@ _log = logging.getLogger("picklescan")
 
 
 def print_summary(show_globals: bool, sr: ScanResult):
-    _log.info(
-        f"""----------- SCAN SUMMARY -----------
+    _log.info(f"""----------- SCAN SUMMARY -----------
 Scanned files: {sr.scanned_files}
 Infected files: {sr.infected_files}
 Suspicious globals: {sr.suspicious_count}
-Dangerous globals: {sr.issues_count}"""
-    )
+Dangerous globals: {sr.issues_count}""")
     if show_globals and len(sr.globals) > 0:
         _log.info("All globals found:")
         for g in sr.globals:
