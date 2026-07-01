@@ -19,6 +19,7 @@ from picklescan.scanner import (
     ScanResult,
     _http_get,
     _list_globals,
+    _build_scan_result_from_raw_globals,
     scan_pickle_bytes,
     scan_zip_bytes,
     scan_directory_path,
@@ -140,6 +141,69 @@ def test_scan_pickle_bytes():
     assert scan_pickle_bytes(io.BytesIO(pickle.dumps(Malicious1())), "file.pkl") == ScanResult(
         [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
     )
+
+
+def test_build_scan_result_suspicious_count():
+    # A single suspicious global is counted as suspicious, not dangerous
+    result = _build_scan_result_from_raw_globals({("collections", "Counter")}, "file.pkl")
+    assert result == ScanResult(
+        [Global("collections", "Counter", SafetyLevel.Suspicious)],
+        1,
+        0,
+        0,
+        False,
+        1,
+    )
+    assert result.suspicious_count == 1
+    assert result.issues_count == 0
+    assert result.infected_files == 0
+
+
+def test_build_scan_result_multiple_suspicious():
+    # Multiple suspicious globals each increment suspicious_count
+    result = _build_scan_result_from_raw_globals(
+        {("collections", "Counter"), ("mymodule", "myfunc")},
+        "file.pkl",
+    )
+    assert result.suspicious_count == 2
+    assert result.issues_count == 0
+    assert result.infected_files == 0
+    assert all(g.safety == SafetyLevel.Suspicious for g in result.globals)
+
+
+def test_build_scan_result_dangerous_not_suspicious():
+    # Dangerous globals must not be counted as suspicious
+    result = _build_scan_result_from_raw_globals({("builtins", "eval")}, "file.pkl")
+    assert result.suspicious_count == 0
+    assert result.issues_count == 1
+    assert result.infected_files == 1
+
+
+def test_build_scan_result_innocuous_not_suspicious():
+    # Innocuous (safe-listed) globals must not be counted as suspicious
+    result = _build_scan_result_from_raw_globals({("collections", "OrderedDict")}, "file.pkl")
+    assert result.suspicious_count == 0
+    assert result.issues_count == 0
+    assert result.globals[0].safety == SafetyLevel.Innocuous
+
+
+def test_build_scan_result_mixed_globals():
+    # Mix of dangerous, suspicious and innocuous globals reports independent counts
+    result = _build_scan_result_from_raw_globals(
+        {("builtins", "eval"), ("collections", "Counter"), ("collections", "OrderedDict")},
+        "file.pkl",
+    )
+    assert result.suspicious_count == 1
+    assert result.issues_count == 1
+    assert result.infected_files == 1
+
+
+def test_scan_result_merge_suspicious_count():
+    # merge() accumulates suspicious_count across results
+    sr1 = _build_scan_result_from_raw_globals({("collections", "Counter")}, "a.pkl")
+    sr2 = _build_scan_result_from_raw_globals({("mymodule", "myfunc")}, "b.pkl")
+    sr1.merge(sr2)
+    assert sr1.suspicious_count == 2
 
 
 def test_scan_zip_bytes():
