@@ -43,6 +43,13 @@ class Malicious2:
         return os.system, ("ls -la",)
 
 
+class Suspicious:
+    def __reduce__(self):
+        import collections
+
+        return collections.Counter, ([1, 2, 3],)
+
+
 class HTTPResponse:
     def __init__(self, status, data=None):
         self.status = status
@@ -112,7 +119,7 @@ def assert_scan(
         ScanResult(
             globals=globals,
             scanned_files=1,
-            issues_count=issues_count if issues_count is not None else sum(g.safety == SafetyLevel.Dangerous for g in globals),
+            issues_count=(issues_count if issues_count is not None else sum(g.safety == SafetyLevel.Dangerous for g in globals)),
             infected_files=infected_files,
         ),
     )
@@ -140,6 +147,17 @@ def test_list_globals():
 def test_scan_pickle_bytes():
     assert scan_pickle_bytes(io.BytesIO(pickle.dumps(Malicious1())), "file.pkl") == ScanResult(
         [Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1
+    )
+
+
+def test_scan_pickle_bytes_strict():
+    data = io.BytesIO(pickle.dumps(Suspicious()))
+
+    assert scan_pickle_bytes(data, "file.pkl") == ScanResult([Global("collections", "Counter", SafetyLevel.Suspicious)], 1, 0, 0, False, 1)
+
+    data.seek(0)
+    assert scan_pickle_bytes(data, "file.pkl", strict=True) == ScanResult(
+        [Global("collections", "Counter", SafetyLevel.Dangerous)], 1, 1, 1
     )
 
 
@@ -185,6 +203,14 @@ def test_build_scan_result_innocuous_not_suspicious():
     assert result.suspicious_count == 0
     assert result.issues_count == 0
     assert result.globals[0].safety == SafetyLevel.Innocuous
+
+
+def test_build_scan_result_strict_no_suspicious():
+    # In strict mode suspicious globals are promoted to dangerous, so suspicious_count stays 0
+    result = _build_scan_result_from_raw_globals({("collections", "Counter")}, "file.pkl", strict=True)
+    assert result.suspicious_count == 0
+    assert result.issues_count == 1
+    assert result.globals[0].safety == SafetyLevel.Dangerous
 
 
 def test_build_scan_result_mixed_globals():
@@ -290,7 +316,10 @@ def test_scan_pytorch():
         1,
     )
     with open(f"{_root_path}/data/pytorch_magic_bypass.pt", "rb") as f:
-        compare_scan_results(scan_pytorch(io.BytesIO(f.read()), "pytorch_magic_bypass.pt"), magic_bypass_result)
+        compare_scan_results(
+            scan_pytorch(io.BytesIO(f.read()), "pytorch_magic_bypass.pt"),
+            magic_bypass_result,
+        )
 
 
 def test_scan_file_path():
@@ -432,12 +461,24 @@ def test_scan_file_path():
         "GHSA-4r9r-ch6f-vxmx.pkl",
         [Global("torch.utils.bottleneck.__main__", "run_cprofile", SafetyLevel.Dangerous)],
     )
-    assert_scan("GHSA-86cj-95qr-2p4f.pkl", [Global("torch._dynamo.guards", "GuardBuilder.get", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-86cj-95qr-2p4f.pkl",
+        [Global("torch._dynamo.guards", "GuardBuilder.get", SafetyLevel.Dangerous)],
+    )
     assert_scan(
         "GHSA-f4x7-rfwp-v3xw.pkl",
-        [Global("torch.fx.experimental.symbolic_shapes", "ShapeEnv.evaluate_guards_expression", SafetyLevel.Dangerous)],
+        [
+            Global(
+                "torch.fx.experimental.symbolic_shapes",
+                "ShapeEnv.evaluate_guards_expression",
+                SafetyLevel.Dangerous,
+            )
+        ],
     )
-    assert_scan("GHSA-f745-w6jp-hpxx.pkl", [Global("torch.utils.collect_env", "run", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-f745-w6jp-hpxx.pkl",
+        [Global("torch.utils.collect_env", "run", SafetyLevel.Dangerous)],
+    )
     assert_scan(
         "GHSA-jhph-76pp-mggw.pkl",
         [
@@ -445,33 +486,150 @@ def test_scan_file_path():
             Global("torch.utils.collect_env", "run_and_read_all", SafetyLevel.Suspicious),
         ],
     )
-    assert_scan("GHSA-h3qp-7fh3-f8h4.pkl", [Global("torch.utils.data.datapipes.utils.decoder", "basichandlers", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-vr7h-p6mm-wpmh.pkl", [Global("torch.jit.unsupported_tensor_ops", "execWrapper", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-vv6j-3g6g-2pvj.pkl", [Global("torch.utils._config_module", "ConfigModule.load_config", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-h3qp-7fh3-f8h4.pkl",
+        [
+            Global(
+                "torch.utils.data.datapipes.utils.decoder",
+                "basichandlers",
+                SafetyLevel.Dangerous,
+            )
+        ],
+    )
+    assert_scan(
+        "GHSA-vr7h-p6mm-wpmh.pkl",
+        [Global("torch.jit.unsupported_tensor_ops", "execWrapper", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-vv6j-3g6g-2pvj.pkl",
+        [
+            Global(
+                "torch.utils._config_module",
+                "ConfigModule.load_config",
+                SafetyLevel.Dangerous,
+            )
+        ],
+    )
     assert_scan("GHSA-5qwp-399c-mjwf.pkl", [Global("trace", "Trace.run", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-g344-hcph-8vgg.pkl", [Global("trace", "Trace.runctx", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-x696-vm39-cp64.pkl", [Global("profile", "Profile.run", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-6vqj-c2q5-j97w.pkl", [Global("profile", "Profile.runctx", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-f54q-57x4-jg88.pkl", [Global("lib2to3.pgen2.grammar", "Grammar.loads", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-3vg9-h568-4w9m.pkl", [Global("idlelib.debugobj", "ObjectTreeItem.SetText", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-6w4w-5w54-rjvr.pkl", [Global("idlelib.autocomplete", "AutoComplete.get_entity", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-7cq8-mj8x-j263.pkl", [Global("idlelib.autocomplete", "AutoComplete.fetch_completions", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-cj3c-v495-4xqh.pkl", [Global("code", "InteractiveInterpreter.runcode", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-8r4j-24qv-fmq9.pkl", [Global("idlelib.calltip", "Calltip.fetch_tip", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-9xph-j2h6-g47v.pkl", [Global("idlelib.calltip", "get_entity", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-4whj-rm5r-c2v8.pkl", [Global("torch.utils.bottleneck.__main__", "run_autograd_prof", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-xp4f-hrf8-rxw7.pkl", [Global("ensurepip", "_run_pip", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-p9w7-82w4-7q8m.pkl", [Global("lib2to3.pgen2.pgen", "ParserGenerator.make_label", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-m869-42cg-3xwr.pkl", [Global("idlelib.run", "Executive.runcode", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-j343-8v2j-ff7w.pkl", [Global("idlelib.pyshell", "ModifiedInterpreter.runcommand", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-3gf5-cxq9-w223.pkl", [Global("idlelib.pyshell", "ModifiedInterpreter.runcode", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-fqq6-7vqf-w3fg.pkl", [Global("doctest", "debug_script", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-g344-hcph-8vgg.pkl",
+        [Global("trace", "Trace.runctx", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-x696-vm39-cp64.pkl",
+        [Global("profile", "Profile.run", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-6vqj-c2q5-j97w.pkl",
+        [Global("profile", "Profile.runctx", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-f54q-57x4-jg88.pkl",
+        [Global("lib2to3.pgen2.grammar", "Grammar.loads", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-3vg9-h568-4w9m.pkl",
+        [Global("idlelib.debugobj", "ObjectTreeItem.SetText", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-6w4w-5w54-rjvr.pkl",
+        [Global("idlelib.autocomplete", "AutoComplete.get_entity", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-7cq8-mj8x-j263.pkl",
+        [
+            Global(
+                "idlelib.autocomplete",
+                "AutoComplete.fetch_completions",
+                SafetyLevel.Dangerous,
+            )
+        ],
+    )
+    assert_scan(
+        "GHSA-cj3c-v495-4xqh.pkl",
+        [Global("code", "InteractiveInterpreter.runcode", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-8r4j-24qv-fmq9.pkl",
+        [Global("idlelib.calltip", "Calltip.fetch_tip", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-9xph-j2h6-g47v.pkl",
+        [Global("idlelib.calltip", "get_entity", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-4whj-rm5r-c2v8.pkl",
+        [
+            Global(
+                "torch.utils.bottleneck.__main__",
+                "run_autograd_prof",
+                SafetyLevel.Dangerous,
+            )
+        ],
+    )
+    assert_scan(
+        "GHSA-xp4f-hrf8-rxw7.pkl",
+        [Global("ensurepip", "_run_pip", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-p9w7-82w4-7q8m.pkl",
+        [
+            Global(
+                "lib2to3.pgen2.pgen",
+                "ParserGenerator.make_label",
+                SafetyLevel.Dangerous,
+            )
+        ],
+    )
+    assert_scan(
+        "GHSA-m869-42cg-3xwr.pkl",
+        [Global("idlelib.run", "Executive.runcode", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-j343-8v2j-ff7w.pkl",
+        [
+            Global(
+                "idlelib.pyshell",
+                "ModifiedInterpreter.runcommand",
+                SafetyLevel.Dangerous,
+            )
+        ],
+    )
+    assert_scan(
+        "GHSA-3gf5-cxq9-w223.pkl",
+        [Global("idlelib.pyshell", "ModifiedInterpreter.runcode", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-fqq6-7vqf-w3fg.pkl",
+        [Global("doctest", "debug_script", SafetyLevel.Dangerous)],
+    )
     assert_scan("GHSA-9w88-8rmg-7g2p.pkl", [Global("cProfile", "runctx", SafetyLevel.Dangerous)])
     assert_scan("GHSA-49gj-c84q-6qm9.pkl", [Global("cProfile", "run", SafetyLevel.Dangerous)])
     assert_scan("GHSA-7wx9-6375-f5wh.pkl", [Global("profile", "run", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-q77w-mwjj-7mqx.pkl", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-jgw4-cr84-mqxg.bin", [Global("asyncio.unix_events", "_UnixSubprocessTransport._start", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-m273-6v24-x4m4.pkl", [Global("distutils.file_util", "write_file", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-q77w-mwjj-7mqx.pkl",
+        [
+            Global(
+                "asyncio.unix_events",
+                "_UnixSubprocessTransport._start",
+                SafetyLevel.Dangerous,
+            )
+        ],
+    )
+    assert_scan(
+        "GHSA-jgw4-cr84-mqxg.bin",
+        [
+            Global(
+                "asyncio.unix_events",
+                "_UnixSubprocessTransport._start",
+                SafetyLevel.Dangerous,
+            )
+        ],
+    )
+    assert_scan(
+        "GHSA-m273-6v24-x4m4.pkl",
+        [Global("distutils.file_util", "write_file", SafetyLevel.Dangerous)],
+    )
     assert_scan("GHSA-4675-36f9-wf6r.pkl", [Global("ctypes", "CDLL", SafetyLevel.Dangerous)])
     assert_scan(
         "GHSA-84r2-jw7c-4r5q.pkl",
@@ -481,23 +639,56 @@ def test_scan_file_path():
         ],
     )
     assert_scan("GHSA-vqmv-47xg-9wpr.pkl", [Global("pty", "spawn", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-r8g5-cgf2-4m4m.pkl", [Global("numpy.f2py.crackfortran", "getlincoef", SafetyLevel.Dangerous)])
-    assert_scan("malicious1_crc.zip", [Global("builtins", name="eval", safety=SafetyLevel.Dangerous)])
-    assert_scan("keyerror-exploit.pkl", [Global("os", "system", SafetyLevel.Dangerous), Global("unknown", "os", SafetyLevel.Dangerous)])
-    assert_scan("type-confusion-exploit.pkl", [Global("42", "os", SafetyLevel.Suspicious), Global("os", "system", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-r8g5-cgf2-4m4m.pkl",
+        [Global("numpy.f2py.crackfortran", "getlincoef", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "malicious1_crc.zip",
+        [Global("builtins", name="eval", safety=SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "keyerror-exploit.pkl",
+        [
+            Global("os", "system", SafetyLevel.Dangerous),
+            Global("unknown", "os", SafetyLevel.Dangerous),
+        ],
+    )
+    assert_scan(
+        "type-confusion-exploit.pkl",
+        [
+            Global("42", "os", SafetyLevel.Suspicious),
+            Global("os", "system", SafetyLevel.Dangerous),
+        ],
+    )
     assert_scan(
         "GHSA-955r-x9j8-7rhh.pkl",
-        [Global("_operator", "methodcaller", SafetyLevel.Dangerous), Global("builtins", "__import__", SafetyLevel.Suspicious)],
+        [
+            Global("_operator", "methodcaller", SafetyLevel.Dangerous),
+            Global("builtins", "__import__", SafetyLevel.Suspicious),
+        ],
     )
     assert_scan(
         "GHSA-46h3-79wf-xr6c.pkl",
-        [Global("_operator", "attrgetter", SafetyLevel.Dangerous), Global("builtins", "__import__", SafetyLevel.Suspicious)],
+        [
+            Global("_operator", "attrgetter", SafetyLevel.Dangerous),
+            Global("builtins", "__import__", SafetyLevel.Suspicious),
+        ],
     )
     assert_scan("io_FileIO.pkl", [Global("_io", "FileIO", SafetyLevel.Dangerous)])
-    assert_scan("urllib_request_urlopen.pkl", [Global("urllib.request", "urlopen", SafetyLevel.Dangerous)])
+    assert_scan(
+        "urllib_request_urlopen.pkl",
+        [Global("urllib.request", "urlopen", SafetyLevel.Dangerous)],
+    )
     # logging.FileHandler can create arbitrary files on the filesystem
-    assert_scan("logging_FileHandler.pkl", [Global("logging", "FileHandler", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-vvpj-8cmc-gx39.pkl", [Global("pkgutil", "resolve_name", SafetyLevel.Dangerous)])
+    assert_scan(
+        "logging_FileHandler.pkl",
+        [Global("logging", "FileHandler", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-vvpj-8cmc-gx39.pkl",
+        [Global("pkgutil", "resolve_name", SafetyLevel.Dangerous)],
+    )
     # types.CodeType can construct arbitrary code objects for execution
     assert_scan("types_CodeType.pkl", [Global("types", "CodeType", SafetyLevel.Dangerous)])
     # cloudpickle uses _make_function and _builtin_type with CodeType to reconstruct arbitrary callables
@@ -513,11 +704,26 @@ def test_scan_file_path():
         ],
     )
     # GHSA-g38g-8gr9-h9xp: Multiple stdlib modules with direct RCE not in blocklist
-    assert_scan("GHSA-g38g-8gr9-h9xp-uuid.pkl", [Global("uuid", "_get_command_stdout", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-g38g-8gr9-h9xp-osx-support.pkl", [Global("_osx_support", "_read_output", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-g38g-8gr9-h9xp-aix-support.pkl", [Global("_aix_support", "_read_cmd_output", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-g38g-8gr9-h9xp-imaplib.pkl", [Global("imaplib", "IMAP4_stream", SafetyLevel.Dangerous)])
-    assert_scan("GHSA-g38g-8gr9-h9xp-pyrepl-pager.pkl", [Global("_pyrepl.pager", "pipe_pager", SafetyLevel.Dangerous)])
+    assert_scan(
+        "GHSA-g38g-8gr9-h9xp-uuid.pkl",
+        [Global("uuid", "_get_command_stdout", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-g38g-8gr9-h9xp-osx-support.pkl",
+        [Global("_osx_support", "_read_output", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-g38g-8gr9-h9xp-aix-support.pkl",
+        [Global("_aix_support", "_read_cmd_output", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-g38g-8gr9-h9xp-imaplib.pkl",
+        [Global("imaplib", "IMAP4_stream", SafetyLevel.Dangerous)],
+    )
+    assert_scan(
+        "GHSA-g38g-8gr9-h9xp-pyrepl-pager.pkl",
+        [Global("_pyrepl.pager", "pipe_pager", SafetyLevel.Dangerous)],
+    )
     assert_scan(
         "GHSA-g38g-8gr9-h9xp-test.pkl",
         [Global("test.support.script_helper", "assert_python_ok", SafetyLevel.Dangerous)],

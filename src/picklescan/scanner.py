@@ -186,10 +186,16 @@ _unsafe_globals = {
     "distutils.file_util": "*",  # arbitrary file write via distutils.file_util.write_file()
     "doctest": {"debug_script"},
     "ensurepip": {"_run_pip"},
-    "idlelib.autocomplete": {"AutoComplete.get_entity", "AutoComplete.fetch_completions"},
+    "idlelib.autocomplete": {
+        "AutoComplete.get_entity",
+        "AutoComplete.fetch_completions",
+    },
     "idlelib.calltip": {"Calltip.fetch_tip", "get_entity"},
     "idlelib.debugobj": {"ObjectTreeItem.SetText"},
-    "idlelib.pyshell": {"ModifiedInterpreter.runcode", "ModifiedInterpreter.runcommand"},
+    "idlelib.pyshell": {
+        "ModifiedInterpreter.runcode",
+        "ModifiedInterpreter.runcommand",
+    },
     "idlelib.run": {"Executive.runcode"},
     "imaplib": {"IMAP4_stream"},  # IMAP4_stream executes commands via subprocess.Popen(command, shell=True)
     "lib2to3.pgen2.grammar": {"Grammar.loads"},
@@ -399,6 +405,7 @@ def _build_scan_result_from_raw_globals(
     raw_globals: Set[Tuple[str, str]],
     file_id,
     scan_err=False,
+    strict=False,
 ) -> ScanResult:
     globals = []
     suspicious_count = 0
@@ -427,6 +434,16 @@ def _build_scan_result_from_raw_globals(
             issues_count += 1
         elif safe_filter is not None and (safe_filter == "*" or g.name in safe_filter):
             g.safety = SafetyLevel.Innocuous
+        elif strict:
+            g.safety = SafetyLevel.Dangerous
+            _log.warning(
+                "%s: %s import '%s %s' FOUND (promoted by --strict)",
+                file_id,
+                g.safety.value,
+                g.module,
+                g.name,
+            )
+            issues_count += 1
         else:
             g.safety = SafetyLevel.Suspicious
             suspicious_count += 1
@@ -435,7 +452,7 @@ def _build_scan_result_from_raw_globals(
     return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, scan_err, suspicious_count)
 
 
-def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanResult:
+def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=False) -> ScanResult:
     """Disassemble a Pickle stream and report issues"""
     _log.debug(f"scan_pickle_bytes({file_id})")
 
@@ -444,8 +461,11 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanRe
     except GenOpsError as e:
         if e.globals is not None:
             # Found some globals before error - could be a malicious partial pickle
-            _log.error(f"ERROR: parsing pickle in {file_id}: {e}", exc_info=_log.isEnabledFor(logging.DEBUG))
-            return _build_scan_result_from_raw_globals(e.globals, file_id, scan_err=True)
+            _log.error(
+                f"ERROR: parsing pickle in {file_id}: {e}",
+                exc_info=_log.isEnabledFor(logging.DEBUG),
+            )
+            return _build_scan_result_from_raw_globals(e.globals, file_id, scan_err=True, strict=strict)
         else:
             # No globals found - likely not a pickle file at all
             _log.warning(f"WARNING: could not parse {file_id} as pickle: {e}")
@@ -453,11 +473,11 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True) -> ScanRe
 
     _log.debug("Global imports in %s: %s", file_id, raw_globals)
 
-    return _build_scan_result_from_raw_globals(raw_globals, file_id)
+    return _build_scan_result_from_raw_globals(raw_globals, file_id, strict=strict)
 
 
 # XXX: it appears there is not way to get the byte stream for a given file within the 7z archive and thus forcing us to unzip to disk before scanning
-def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
+def scan_7z_bytes(data: IO[bytes], file_id, strict=False) -> ScanResult:
     _log.debug(f"scan_7z_bytes({file_id})")
 
     try:
@@ -476,12 +496,12 @@ def scan_7z_bytes(data: IO[bytes], file_id) -> ScanResult:
                 file_path = os.path.join(tmpdir, file_name)
                 _log.debug("Scanning file %s in 7z archive %s", file_name, file_id)
                 if os.path.isfile(file_path):
-                    result.merge(scan_file_path(file_path))
+                    result.merge(scan_file_path(file_path, strict=strict))
 
             return result
 
 
-def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
+def scan_zip_bytes(data: IO[bytes], file_id, strict=False) -> ScanResult:
     _log.debug(f"scan_zip_bytes({file_id})")
 
     result = ScanResult([])
@@ -498,12 +518,12 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
                 if file_ext in _pickle_file_extensions or any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
                     _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                     with zip.open(file_name, "r") as file:
-                        result.merge(scan_pickle_bytes(file, f"{file_id}:{file_name}"))
+                        result.merge(scan_pickle_bytes(file, f"{file_id}:{file_name}", strict=strict))
 
                 elif file_ext in _numpy_file_extensions or magic_bytes.startswith(_numpy_magic_bytes):
                     _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                     with zip.open(file_name, "r") as file:
-                        result.merge(scan_numpy(file, f"{file_id}:{file_name}"))
+                        result.merge(scan_numpy(file, f"{file_id}:{file_name}", strict=strict))
             except (zipfile.BadZipFile, RuntimeError) as e:
                 # Log decompression issues (password protected, corrupted, etc.)
                 _log.warning("Invalid file %s in zip archive %s: %s", file_name, file_id, str(e))
@@ -511,7 +531,7 @@ def scan_zip_bytes(data: IO[bytes], file_id) -> ScanResult:
     return result
 
 
-def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
+def scan_numpy(data: IO[bytes], file_id, strict=False) -> ScanResult:
     _log.debug(f"scan_numpy({file_id})")
 
     # Delay import to avoid dependency on NumPy
@@ -540,21 +560,21 @@ def scan_numpy(data: IO[bytes], file_id) -> ScanResult:
             raise ValueError(f"Unsupported numpy format version: {version}")
 
         if dtype.hasobject:
-            return scan_pickle_bytes(data, file_id)
+            return scan_pickle_bytes(data, file_id, strict=strict)
         else:
             return ScanResult([], 1)
     else:
-        return scan_pickle_bytes(data, file_id)
+        return scan_pickle_bytes(data, file_id, strict=strict)
 
 
-def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
+def scan_pytorch(data: IO[bytes], file_id, strict=False) -> ScanResult:
     _log.debug(f"scan_pytorch({file_id})")
 
     # new pytorch format
     if _is_zipfile(data):
-        return scan_zip_bytes(data, file_id)
+        return scan_zip_bytes(data, file_id, strict=strict)
     elif _is_7z_file(data):
-        return scan_7z_bytes(data, file_id)
+        return scan_7z_bytes(data, file_id, strict=strict)
     # old pytorch format
     else:
         scan_result = ScanResult([])
@@ -577,7 +597,7 @@ def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
             # dangerous globals -- a legitimate magic pickle contains only
             # a simple integer and should have zero globals.
             data.seek(0)
-            first_pickle_result = scan_pickle_bytes(data, file_id, multiple_pickles=False)
+            first_pickle_result = scan_pickle_bytes(data, file_id, multiple_pickles=False, strict=strict)
             if first_pickle_result.globals:
                 _log.debug(
                     f"Potential PyTorch magic number bypass detected in {file_id}. Ignoring magic number and treating file as a pickle."
@@ -587,18 +607,18 @@ def scan_pytorch(data: IO[bytes], file_id) -> ScanResult:
                 raise InvalidMagicError(magic, MAGIC_NUMBER, file_id)
 
         for _ in range(5):
-            scan_result.merge(scan_pickle_bytes(data, file_id, multiple_pickles=False))
+            scan_result.merge(scan_pickle_bytes(data, file_id, multiple_pickles=False, strict=strict))
         scan_result.scanned_files = 1
         scan_result.infected_files = min(1, scan_result.infected_files)
         return scan_result
 
 
-def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> ScanResult:
+def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None, strict=False) -> ScanResult:
     _log.debug(f"scan_bytes({file_id})")
 
     if file_ext is not None and file_ext in _pytorch_file_extensions:
         try:
-            return scan_pytorch(data, file_id)
+            return scan_pytorch(data, file_id, strict=strict)
         except InvalidMagicError as e:
             _log.warning(
                 f"WARNING: Invalid PyTorch magic number for file {e}. Trying to scan as non-PyTorch file.",
@@ -607,19 +627,19 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None) -> Scan
             data.seek(0)
 
     if file_ext is not None and file_ext in _numpy_file_extensions:
-        return scan_numpy(data, file_id)
+        return scan_numpy(data, file_id, strict=strict)
 
     is_zip = zipfile.is_zipfile(data)
     data.seek(0)
     if is_zip:
-        return scan_zip_bytes(data, file_id)
+        return scan_zip_bytes(data, file_id, strict=strict)
     elif _is_7z_file(data):
-        return scan_7z_bytes(data, file_id)
+        return scan_7z_bytes(data, file_id, strict=strict)
     else:
-        return scan_pickle_bytes(data, file_id)
+        return scan_pickle_bytes(data, file_id, strict=strict)
 
 
-def scan_huggingface_model(repo_id):
+def scan_huggingface_model(repo_id, strict=False):
     _log.debug(f"scan_huggingface_model({repo_id})")
 
     # List model files
@@ -635,7 +655,7 @@ def scan_huggingface_model(repo_id):
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
         url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
         data = io.BytesIO(_http_get(url))
-        scan_result.merge(scan_bytes(data, url, file_ext))
+        scan_result.merge(scan_bytes(data, url, file_ext, strict=strict))
 
     return scan_result
 
@@ -645,7 +665,7 @@ def _matches_any(patterns: List[re.Pattern], text: str) -> bool:
     return any(p.search(text) for p in patterns)
 
 
-def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None) -> ScanResult:
+def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None, strict=False) -> ScanResult:
     _log.debug(f"scan_directory_path({path})")
 
     scan_result = ScanResult([])
@@ -686,20 +706,20 @@ def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None) -> ScanR
 
             _log.debug("Scanning file %s", file_path)
             with open(file_path, "rb") as file:
-                scan_result.merge(scan_bytes(file, file_path, file_ext))
+                scan_result.merge(scan_bytes(file, file_path, file_ext, strict=strict))
 
     return scan_result
 
 
-def scan_file_path(path) -> ScanResult:
+def scan_file_path(path, strict=False) -> ScanResult:
     _log.debug(f"scan_file_path({path})")
 
     file_ext = os.path.splitext(path)[1]
     with open(path, "rb") as file:
-        return scan_bytes(file, path, file_ext)
+        return scan_bytes(file, path, file_ext, strict=strict)
 
 
-def scan_url(url) -> ScanResult:
+def scan_url(url, strict=False) -> ScanResult:
     _log.debug(f"scan_url({url})")
 
-    return scan_bytes(io.BytesIO(_http_get(url)), url)
+    return scan_bytes(io.BytesIO(_http_get(url)), url, strict=strict)
