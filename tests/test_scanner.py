@@ -20,6 +20,7 @@ from picklescan.scanner import (
     _http_get,
     _list_globals,
     _build_scan_result_from_raw_globals,
+    scan_bytes,
     scan_pickle_bytes,
     scan_zip_bytes,
     scan_directory_path,
@@ -780,6 +781,100 @@ def test_scan_file_path_npz():
             infected_files=0,
         ),
     )
+
+
+def test_scan_bytes_content_over_extension():
+    """Files whose extension does not match their content are dispatched on magic bytes, not extension (common with mislabeled uploads)."""
+    npy_result = ScanResult(
+        [
+            Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Innocuous),
+            Global("numpy", "ndarray", SafetyLevel.Innocuous),
+            Global("numpy", "dtype", SafetyLevel.Innocuous),
+        ],
+        scanned_files=1,
+        issues_count=0,
+        infected_files=0,
+    )
+    with open(f"{_root_path}/data2/object_array.npy", "rb") as f:
+        npy_bytes = f.read()
+    # numpy content wearing a pickle/pytorch/no extension must reach scan_numpy, not crash the pickle parser on \x93 (STACK_GLOBAL)
+    for file_ext in (".pkl", ".bin", None):
+        compare_scan_results(scan_bytes(io.BytesIO(npy_bytes), f"mislabeled{file_ext}", file_ext), npy_result)
+
+    # npz (zip) content wearing a .npy extension is scanned as a zip archive
+    with open(f"{_root_path}/data2/object_arrays.npz", "rb") as f:
+        npz_bytes = f.read()
+    npz_result = ScanResult(
+        [
+            Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Innocuous),
+            Global("numpy", "ndarray", SafetyLevel.Innocuous),
+            Global("numpy", "dtype", SafetyLevel.Innocuous),
+        ]
+        * 2,
+        scanned_files=2,
+        issues_count=0,
+        infected_files=0,
+    )
+    compare_scan_results(scan_bytes(io.BytesIO(npz_bytes), "mislabeled.npy", ".npy"), npz_result)
+    # same content handed straight to scan_numpy (e.g. a zip member) routes to the zip scanner instead of raising
+    compare_scan_results(scan_numpy(io.BytesIO(npz_bytes), "mislabeled.npy"), npz_result)
+
+    # pickle content wearing a .npy extension is scanned as pickle
+    compare_scan_results(
+        scan_bytes(io.BytesIO(pickle.dumps(Malicious1())), "mislabeled.npy", ".npy"),
+        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1),
+    )
+
+
+def test_scan_zip_bytes_member_content_over_extension():
+    """A zip member with numpy content and a pickle extension is scanned as numpy."""
+    with open(f"{_root_path}/data2/object_array.npy", "rb") as f:
+        npy_bytes = f.read()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip:
+        zip.writestr("data.pkl", npy_bytes)
+
+    compare_scan_results(
+        scan_zip_bytes(io.BytesIO(buffer.getbuffer()), "test.zip"),
+        ScanResult(
+            [
+                Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Innocuous),
+                Global("numpy", "ndarray", SafetyLevel.Innocuous),
+                Global("numpy", "dtype", SafetyLevel.Innocuous),
+            ],
+            scanned_files=1,
+            issues_count=0,
+            infected_files=0,
+        ),
+    )
+
+
+def test_scan_file_path_extensionless_pytorch(tmp_path):
+    """PyTorch files without an extension are detected by content: zip format via magic bytes, legacy format via its pickled
+    serialization magic number, so neither ends up on the generic multi-pickle path with scan_err set."""
+    expected = ScanResult(
+        [
+            Global("torch", "FloatStorage", SafetyLevel.Innocuous),
+            Global("collections", "OrderedDict", SafetyLevel.Innocuous),
+            Global("torch._utils", "_rebuild_tensor_v2", SafetyLevel.Innocuous),
+        ],
+        scanned_files=1,
+        issues_count=0,
+        infected_files=0,
+    )
+    for fixture in ("pytorch_model.bin", "new_pytorch_model.bin"):
+        with open(f"{_root_path}/data/{fixture}", "rb") as f:
+            target = tmp_path / f"extensionless_{fixture.split('.')[0]}"
+            target.write_bytes(f.read())
+        result = scan_file_path(str(target))
+        compare_scan_results(result, expected)
+        assert result.scan_err is False
+
+
+def test_stack_global_underflow_does_not_crash():
+    result = scan_pickle_bytes(io.BytesIO(b"\x93NUMPY\x01\x00v\x00"), "not_a_pickle")
+    compare_scan_results(result, ScanResult([], scanned_files=1, issues_count=0, infected_files=0))
+    assert result.scan_err is True
 
 
 def test_scan_directory_path():
