@@ -155,7 +155,7 @@ _unsafe_globals = {
     "bdb": "*",
     "commands": "*",  # Python 2 precursor to subprocess
     "ctypes": "*",  # Foreign function interface, can load DLLs, call C functions, manipulate raw memory
-    "functools": "partial",  # functools.partial(os.system, "echo pwned")
+    "functools": {"partial"},  # functools.partial(os.system, "echo pwned")
     "httplib": "*",  # Includes http.client.HTTPSConnection()
     "logging": {"FileHandler"},  # logging.FileHandler can create arbitrary files on the filesystem
     "_io": {"FileIO"},  # io.FileIO is stored as _io.FileIO, can read arbitrary files bypassing builtins.open blocklist
@@ -211,10 +211,10 @@ _unsafe_globals = {
     "test": "*",  # test.support.script_helper.assert_python_ok spawns arbitrary python subprocesses
     "timeit": "*",
     "torch._dynamo.guards": {"GuardBuilder.get"},
-    "torch._inductor.codecache": "compile_file",  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
+    "torch._inductor.codecache": {"compile_file"},  # compile_file('', '', ['sh', '-c','$(echo pwned)'])
     "torch.fx.experimental.symbolic_shapes": {"ShapeEnv.evaluate_guards_expression"},
     "torch.jit.unsupported_tensor_ops": {"execWrapper"},
-    "torch.serialization": "load",  # pickle could be used to load a different file
+    "torch.serialization": {"load"},  # pickle could be used to load a different file
     "torch.utils._config_module": {
         "ConfigModule.load_config"
     },  # allows storing a pickle inside a pickle (if this has valid use cases, scan the input bytes instead of flagging the global)
