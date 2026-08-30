@@ -46,7 +46,7 @@ Decide which kind of claim it is:
   -> go to Step 2.
 - **Structural / parser-differential claim** (FRAME/prefetch desync, extension-registry gap,
   length-field discrepancy, opcode-parsing disagreement) -> the block-list cannot fix this.
-  Run `python3 scripts/triage_advisory.py --structural` for the handling procedure, reproduce
+  Run `python3 tools/triage_advisory.py --structural` for the handling procedure, reproduce
   the parser disagreement WITHOUT executing (pickletools vs. a deny-all `pickle.Unpickler`),
   and route the fix to the parser/structural-consistency layer. Do not add a `_unsafe_globals`
   entry for it.
@@ -56,7 +56,7 @@ Decide which kind of claim it is:
 Run the triage tool with the module and name you typed from the advisory:
 
 ```bash
-python3 scripts/triage_advisory.py --ghsa ${input:ghsa_id} <module> <name>
+python3 tools/triage_advisory.py --ghsa ${input:ghsa_id} <module> <name>
 ```
 
 - **ALREADY-DETECTED** -> no code change. Reply on the advisory citing the covering

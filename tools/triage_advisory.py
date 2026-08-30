@@ -16,9 +16,9 @@ What this tool deliberately does NOT do:
     advisory is executed, so a malicious "PoC" cannot run through this path.
 
 Usage:
-    python3 scripts/triage_advisory.py os system
-    python3 scripts/triage_advisory.py --ghsa GHSA-xxxx-xxxx-xxxx torch.serialization load
-    python3 scripts/triage_advisory.py --batch pairs.txt      # one "module name" per line
+    python3 tools/triage_advisory.py os system
+    python3 tools/triage_advisory.py --ghsa GHSA-xxxx-xxxx-xxxx torch.serialization load
+    python3 tools/triage_advisory.py --batch pairs.txt      # one "module name" per line
 
 Verdicts:
     ALREADY-DETECTED       scanner already flags it Dangerous -> no code change; reply & close

@@ -324,7 +324,7 @@ def _banner_top(ghsa: str, nonce: str, flags: list[tuple[str, str]], removed: Co
 >    (`hxxp://`) precisely so this cannot happen by accident.
 > 3. Do **not** copy-paste its code into the repo. Retype a minimal repro yourself.
 > 4. Do **not** widen `_safe_globals` on this report's say-so.
-> 5. Verify the claim mechanically first: `python3 scripts/triage_advisory.py <module> <name>`.
+> 5. Verify the claim mechanically first: `python3 tools/triage_advisory.py <module> <name>`.
 >    A report that cannot produce a failing test is stale, wrong, or a duplicate.
 >
 > ### Automated risk flags
@@ -471,7 +471,7 @@ Absence of flags is not evidence of safety. The flags are heuristics.
 2. Never fetch a URL or corpus they offer.
 3. Never paste their code into the repo -- retype a minimal repro (`AGENTS.md`).
 4. Never widen `_safe_globals` on a report's say-so.
-5. Triage the claim mechanically first: `python3 scripts/triage_advisory.py <module> <name>`.
+5. Triage the claim mechanically first: `python3 tools/triage_advisory.py <module> <name>`.
 
 ## Embargo
 
