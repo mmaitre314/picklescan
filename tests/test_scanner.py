@@ -20,6 +20,7 @@ from picklescan.scanner import (
     _http_get,
     _list_globals,
     _build_scan_result_from_raw_globals,
+    _unsafe_globals,
     scan_pickle_bytes,
     scan_zip_bytes,
     scan_directory_path,
@@ -222,6 +223,49 @@ def test_build_scan_result_mixed_globals():
     assert result.suspicious_count == 1
     assert result.issues_count == 1
     assert result.infected_files == 1
+
+
+def test_unsafe_globals_entries_are_wildcard_or_collection():
+    # Regression guard for the whole class of bug fixed here: a bare string value makes
+    # `g.name in unsafe_filter` a SUBSTRING match rather than an equality check, so any
+    # global whose name is a substring of the entry gets flagged Dangerous. Every value
+    # must be either the "*" wildcard or a collection of exact names.
+    for module, names in _unsafe_globals.items():
+        if names == "*":
+            continue
+        assert not isinstance(names, str), (
+            f"_unsafe_globals['{module}'] is the bare string {names!r}; " f"wrap it in a set to avoid substring matching: {{{names!r}}}"
+        )
+        assert all(isinstance(n, str) for n in names), f"_unsafe_globals['{module}'] must contain only strings"
+
+
+def test_unsafe_globals_exact_name_match_only():
+    # Names that are substrings of a block-listed name must NOT be flagged. picklescan
+    # runs in the Hugging Face Hub pipeline, so an over-broad match flags real models.
+    for module, name in [
+        ("functools", "art"),
+        ("functools", "a"),
+        ("functools", "partia"),
+        ("torch.serialization", "oa"),
+        ("torch.serialization", "loa"),
+        ("torch._inductor.codecache", "compile"),
+        ("torch._inductor.codecache", "file"),
+    ]:
+        result = _build_scan_result_from_raw_globals({(module, name)}, "file.pkl")
+        assert result.globals[0].safety != SafetyLevel.Dangerous, f"{module}.{name} must not be flagged Dangerous"
+        assert result.issues_count == 0
+
+
+def test_unsafe_globals_still_flag_exact_names():
+    # The fix must not weaken detection: the real block-listed names stay Dangerous.
+    for module, name in [
+        ("functools", "partial"),
+        ("torch.serialization", "load"),
+        ("torch._inductor.codecache", "compile_file"),
+    ]:
+        result = _build_scan_result_from_raw_globals({(module, name)}, "file.pkl")
+        assert result.globals[0].safety == SafetyLevel.Dangerous, f"{module}.{name} must be flagged Dangerous"
+        assert result.issues_count == 1
 
 
 def test_scan_result_merge_suspicious_count():
