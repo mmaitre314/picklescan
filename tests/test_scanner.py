@@ -31,6 +31,7 @@ from picklescan.scanner import (
     scan_numpy,
     scan_pytorch,
 )
+from picklescan.torch import MAGIC_NUMBER
 
 _root_path = os.path.dirname(__file__)
 
@@ -848,7 +849,7 @@ def test_scan_bytes_content_over_extension():
     # numpy content wearing a pickle/pytorch/no extension must reach scan_numpy, not crash the pickle parser on \x93 (STACK_GLOBAL)
     for file_ext in (".pkl", ".bin", None):
         compare_scan_results(
-            scan_bytes(io.BytesIO(npy_bytes), f"mislabeled{file_ext}", file_ext),
+            scan_bytes(io.BytesIO(npy_bytes), f"mislabeled{file_ext or ''}", file_ext),
             npy_result,
         )
 
@@ -923,8 +924,71 @@ def test_scan_file_path_extensionless_pytorch(tmp_path):
 
 
 def test_stack_global_underflow_does_not_crash():
+    # Not a pickle: reported like any other unparsable input (no globals, no error flag), not raised
     result = scan_pickle_bytes(io.BytesIO(b"\x93NUMPY\x01\x00v\x00"), "not_a_pickle")
     compare_scan_results(result, ScanResult([], scanned_files=1, issues_count=0, infected_files=0))
+
+
+def test_stack_global_underflow_keeps_found_globals():
+    # A malformed STACK_GLOBAL appended after a valid malicious pickle must not wipe the findings: pickle.load stops at the first
+    # STOP and runs the payload regardless of the trailing bytes
+    result = scan_pickle_bytes(io.BytesIO(pickle.dumps(Malicious1()) + b"\x93"), "malicious_with_trailer.pkl")
+    compare_scan_results(result, ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1, scan_err=True))
+
+
+def test_scan_file_path_legacy_pytorch_magic_in_pickle_file(tmp_path):
+    # The legacy PyTorch magic number is attacker-controlled; it must not downgrade a .pkl file to the capped legacy PyTorch scan,
+    # which would stop before the payload hidden after five benign pickles
+    blob = pickle.dumps(MAGIC_NUMBER, protocol=2) + b"".join(pickle.dumps(i, protocol=2) for i in range(5)) + pickle.dumps(Malicious1())
+    target = tmp_path / "padded.pkl"
+    target.write_bytes(blob)
+    compare_scan_results(scan_file_path(str(target)), ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1))
+
+
+def _nested_zip(depth: int) -> bytes:
+    """A malicious pickle wrapped in `depth` zips, each inner zip stored as an `.npy` member to go through scan_numpy."""
+    data = b""
+    for _ in range(depth):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zip:
+            if data:
+                zip.writestr("nested.npy", data)
+            else:
+                zip.writestr("payload.pkl", pickle.dumps(Malicious1()))
+        data = buffer.getvalue()
+    return data
+
+
+def test_scan_nested_zip_archives():
+    compare_scan_results(
+        scan_bytes(io.BytesIO(_nested_zip(3)), "nested.zip", ".zip"),
+        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1),
+    )
+    # Past the depth cap the scan stops and reports an error instead of recursing until RecursionError is silently swallowed
+    result = scan_bytes(io.BytesIO(_nested_zip(50)), "nested.zip", ".zip")
+    assert result.globals == []
+    assert result.scan_err is True
+
+
+def _nested_7z(depth: int) -> bytes:
+    """A malicious pickle wrapped in `depth` 7z archives, each inner archive stored under a `.pkl` name."""
+    py7zr = pytest.importorskip("py7zr")
+    data = pickle.dumps(Malicious1())
+    for _ in range(depth):
+        buffer = io.BytesIO()
+        with py7zr.SevenZipFile(buffer, "w") as archive:
+            archive.writestr(data, "nested.pkl")
+        data = buffer.getvalue()
+    return data
+
+
+def test_scan_nested_7z_archives():
+    compare_scan_results(
+        scan_bytes(io.BytesIO(_nested_7z(3)), "nested.7z", ".7z"),
+        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1),
+    )
+    result = scan_bytes(io.BytesIO(_nested_7z(12)), "nested.7z", ".7z")
+    assert result.globals == []
     assert result.scan_err is True
 
 

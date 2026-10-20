@@ -254,6 +254,9 @@ _numpy_file_extensions = {".npy"}  # Note: .npz is handled as zip files
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data"}
 _zip_file_extensions = {".zip", ".npz", ".7z"}
+# Archives can contain archives (zip member disguised as .npy, 7z member disguised as .pkl, zip quines...). Each level recurses, so
+# cap the nesting to keep the scan bounded, and report anything deeper as a scan error rather than silently skipping it.
+_max_archive_depth = 8
 # Pickle files do not actually have magic bytes, but v2+ files
 # start with a PROTO (\x80) opcode followed by a byte with the protocol version
 _pickle_magic_bytes = {
@@ -399,7 +402,10 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                     if len(values) == 2:
                         break
                 if len(values) != 2:
-                    raise ValueError(f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2.")
+                    raise GenOpsError(
+                        f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2.",
+                        globals if len(globals) > 0 else None,
+                    )
                 globals.add((values[1], values[0]))
 
         if not multiple_pickles:
@@ -473,9 +479,6 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=Fa
 
     try:
         raw_globals = _list_globals(data, multiple_pickles)
-    except ValueError as e:
-        _log.warning(f"WARNING: could not parse {file_id} as pickle: {e}")
-        return ScanResult([], scanned_files=1, scan_err=True)
     except GenOpsError as e:
         if e.globals is not None:
             # Found some globals before error - could be a malicious partial pickle
@@ -495,8 +498,12 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=Fa
 
 
 # XXX: it appears there is not way to get the byte stream for a given file within the 7z archive and thus forcing us to unzip to disk before scanning
-def scan_7z_bytes(data: IO[bytes], file_id, strict=False) -> ScanResult:
+def scan_7z_bytes(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
     _log.debug(f"scan_7z_bytes({file_id})")
+
+    if _depth > _max_archive_depth:
+        _log.error(f"ERROR: {file_id} is nested more than {_max_archive_depth} archives deep, not scanning it")
+        return ScanResult([], scanned_files=1, scan_err=True)
 
     try:
         import py7zr
@@ -514,13 +521,18 @@ def scan_7z_bytes(data: IO[bytes], file_id, strict=False) -> ScanResult:
                 file_path = os.path.join(tmpdir, file_name)
                 _log.debug("Scanning file %s in 7z archive %s", file_name, file_id)
                 if os.path.isfile(file_path):
-                    result.merge(scan_file_path(file_path, strict=strict))
+                    with open(file_path, "rb") as file:
+                        result.merge(scan_bytes(file, file_path, os.path.splitext(file_path)[1], strict=strict, _depth=_depth + 1))
 
             return result
 
 
-def scan_zip_bytes(data: IO[bytes], file_id, strict=False) -> ScanResult:
+def scan_zip_bytes(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
     _log.debug(f"scan_zip_bytes({file_id})")
+
+    if _depth > _max_archive_depth:
+        _log.error(f"ERROR: {file_id} is nested more than {_max_archive_depth} archives deep, not scanning it")
+        return ScanResult([], scanned_files=1, scan_err=True)
 
     result = ScanResult([])
 
@@ -537,7 +549,7 @@ def scan_zip_bytes(data: IO[bytes], file_id, strict=False) -> ScanResult:
                 if magic_bytes.startswith(_numpy_magic_bytes):
                     _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                     with zip.open(file_name, "r") as file:
-                        result.merge(scan_numpy(file, f"{file_id}:{file_name}", strict=strict))
+                        result.merge(scan_numpy(file, f"{file_id}:{file_name}", strict=strict, _depth=_depth + 1))
 
                 elif file_ext in _pickle_file_extensions or any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
                     _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
@@ -547,7 +559,7 @@ def scan_zip_bytes(data: IO[bytes], file_id, strict=False) -> ScanResult:
                 elif file_ext in _numpy_file_extensions:
                     _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                     with zip.open(file_name, "r") as file:
-                        result.merge(scan_numpy(file, f"{file_id}:{file_name}", strict=strict))
+                        result.merge(scan_numpy(file, f"{file_id}:{file_name}", strict=strict, _depth=_depth + 1))
             except (zipfile.BadZipFile, RuntimeError) as e:
                 # Log decompression issues (password protected, corrupted, etc.)
                 _log.warning("Invalid file %s in zip archive %s: %s", file_name, file_id, str(e))
@@ -555,7 +567,7 @@ def scan_zip_bytes(data: IO[bytes], file_id, strict=False) -> ScanResult:
     return result
 
 
-def scan_numpy(data: IO[bytes], file_id, strict=False) -> ScanResult:
+def scan_numpy(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
     _log.debug(f"scan_numpy({file_id})")
 
     # Delay import to avoid dependency on NumPy
@@ -570,7 +582,7 @@ def scan_numpy(data: IO[bytes], file_id, strict=False) -> ScanResult:
     # to seek past the beginning of the file
     data.seek(-min(N, len(magic)), 1)  # back-up
     if magic.startswith(_ZIP_PREFIX) or magic.startswith(_ZIP_SUFFIX):
-        return scan_zip_bytes(data, file_id, strict=strict)
+        return scan_zip_bytes(data, file_id, strict=strict, _depth=_depth)
     elif magic == np.lib.format.MAGIC_PREFIX:
         # .npy file
 
@@ -590,14 +602,14 @@ def scan_numpy(data: IO[bytes], file_id, strict=False) -> ScanResult:
         return scan_pickle_bytes(data, file_id, strict=strict)
 
 
-def scan_pytorch(data: IO[bytes], file_id, strict=False) -> ScanResult:
+def scan_pytorch(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
     _log.debug(f"scan_pytorch({file_id})")
 
     # new pytorch format
     if _is_zipfile(data):
-        return scan_zip_bytes(data, file_id, strict=strict)
+        return scan_zip_bytes(data, file_id, strict=strict, _depth=_depth)
     elif _is_7z_file(data):
-        return scan_7z_bytes(data, file_id, strict=strict)
+        return scan_7z_bytes(data, file_id, strict=strict, _depth=_depth)
     # old pytorch format
     else:
         scan_result = ScanResult([])
@@ -636,19 +648,22 @@ def scan_pytorch(data: IO[bytes], file_id, strict=False) -> ScanResult:
         return scan_result
 
 
-def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None, strict=False) -> ScanResult:
+def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None, strict=False, _depth=0) -> ScanResult:
     _log.debug(f"scan_bytes({file_id})")
 
     start = data.tell()
     magic_bytes = data.read(8)
     data.seek(start)
 
+    def is_legacy_pytorch() -> bool:
+        return file_ext not in _pickle_file_extensions and _is_legacy_pytorch(data)
+
     if magic_bytes.startswith(_numpy_magic_bytes):
-        return scan_numpy(data, file_id, strict=strict)
+        return scan_numpy(data, file_id, strict=strict, _depth=_depth)
 
     if file_ext is not None and file_ext in _pytorch_file_extensions:
         try:
-            return scan_pytorch(data, file_id, strict=strict)
+            return scan_pytorch(data, file_id, strict=strict, _depth=_depth)
         except InvalidMagicError as e:
             _log.warning(
                 f"WARNING: Invalid PyTorch magic number for file {e}. Trying to scan as non-PyTorch file.",
@@ -657,18 +672,18 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None, strict=
             data.seek(start)
 
     if any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
-        if _is_legacy_pytorch(data):
-            return scan_pytorch(data, file_id, strict=strict)
+        if is_legacy_pytorch():
+            return scan_pytorch(data, file_id, strict=strict, _depth=_depth)
         return scan_pickle_bytes(data, file_id, strict=strict)
 
     is_zip = zipfile.is_zipfile(data)
     data.seek(start)
     if is_zip:
-        return scan_zip_bytes(data, file_id, strict=strict)
+        return scan_zip_bytes(data, file_id, strict=strict, _depth=_depth)
     elif _is_7z_file(data):
-        return scan_7z_bytes(data, file_id, strict=strict)
-    elif _is_legacy_pytorch(data):
-        return scan_pytorch(data, file_id, strict=strict)
+        return scan_7z_bytes(data, file_id, strict=strict, _depth=_depth)
+    elif is_legacy_pytorch():
+        return scan_pytorch(data, file_id, strict=strict, _depth=_depth)
     else:
         return scan_pickle_bytes(data, file_id, strict=strict)
 
