@@ -1056,6 +1056,14 @@ def initialize_numpy_files():
     if not os.path.exists(path):
         np.savez_compressed(path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int))
 
+    # joblib writes object arrays as a complete pickle embedded in the middle of the outer pickle
+    for protocol in (2, 3, 4, 5):
+        path = f"{_root_path}/data2/joblib_object_array_p{protocol}.joblib"
+        if not os.path.exists(path):
+            import joblib
+
+            joblib.dump({"objects": np.array([{"a": i} for i in range(10)], dtype=object), "name": "x"}, path, protocol=protocol)
+
     path = f"{_root_path}/data2/dns_exfiltration.npy"
     if not os.path.exists(path):
 

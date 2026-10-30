@@ -1,4 +1,5 @@
 import http.client
+from collections import OrderedDict
 import importlib
 import io
 import json
@@ -279,9 +280,9 @@ def test_unsafe_globals_entries_are_wildcard_or_collection():
     for module, names in _unsafe_globals.items():
         if names == "*":
             continue
-        assert not isinstance(names, str), (
-            f"_unsafe_globals['{module}'] is the bare string {names!r} " f"wrap it in a set to avoid substring matching: {{{names!r}}}"
-        )
+        assert not isinstance(
+            names, str
+        ), f"_unsafe_globals['{module}'] is the bare string {names!r}, wrap it in a set to avoid substring matching: {{{names!r}}}"
         assert all(isinstance(n, str) for n in names), f"_unsafe_globals['{module}'] must contain only strings"
 
 
@@ -747,7 +748,7 @@ def test_scan_file_path():
     assert_scan(
         "type-confusion-exploit.pkl",
         [
-            Global("42", "os", SafetyLevel.Suspicious),
+            # the memo slot used as module name holds an int: "STACK_GLOBAL requires str", nothing is imported there
             Global("os", "system", SafetyLevel.Dangerous),
         ],
     )
@@ -1007,14 +1008,134 @@ def test_scan_pickle_bytes_large_arguments_stay_out_of_memory():
     assert peak < 8 << 20, f"peak memory {peak / 2**20:.1f} MiB"
 
 
-def test_skipped_bytes_argument_as_stack_global_operand():
-    # A large bytes argument is not kept in memory; resolved through the memo as a STACK_GLOBAL operand it reads as "unknown"
+def test_stack_global_operands_that_are_not_strings():
+    # "STACK_GLOBAL requires str": bytes (even large ones, which are not kept) or numbers as operands import nothing
     blob = b"B" + (5000).to_bytes(4, "little") + b"x" * 5000
     data = b"\x80\x04" + blob + b"\x94" + b"\x8c\x0bcollections" + b"h\x00" + b"\x93."
-    compare_scan_results(
-        scan_pickle_bytes(io.BytesIO(data), "skipped_operand.pkl"),
-        ScanResult([Global("collections", "unknown", SafetyLevel.Dangerous)], 1, 1, 1),
+    compare_scan_results(scan_pickle_bytes(io.BytesIO(data), "bytes_operand.pkl"), ScanResult([], 1, 0, 0))
+    data = b"\x80\x04K\x2a\x94\x8c\x06system" + b"h\x00\x8c\x06system\x93."
+    compare_scan_results(scan_pickle_bytes(io.BytesIO(data), "int_operand.pkl"), ScanResult([], 1, 0, 0))
+    # ... while operands that could be strings at load time (the result of a call, of an unsafe import) are unknown
+    data = b"\x80\x04\x8c\x08builtins\x8c\x03str\x93\x8c\x02os\x85R\x94\x8c\x06system\x93."
+    result = scan_pickle_bytes(io.BytesIO(data), "call_operand.pkl")
+    assert Global("unknown", "system", SafetyLevel.Dangerous) in result.globals
+
+
+def test_safe_imports_after_module_attributes_may_have_changed():
+    # BUILD on a module replaces its attributes: torch._utils._rebuild_tensor_v2 (a safe import) then returns the string "os"
+    data = (
+        b"\x80\x04\x8c\x05torch\x8c\x06_utils\x93}\x8c\x12_rebuild_tensor_v2\x8c\x02oss" + b"b0"
+        b"\x8c\x0ctorch._utils\x8c\x12_rebuild_tensor_v2\x93\x8c\x06system\x93N\x85R."
     )
+    result = scan_pickle_bytes(io.BytesIO(data), "module_override.pkl")
+    assert Global("unknown", "system", SafetyLevel.Dangerous) in result.globals
+    # same through a call to something else than a safe class or function
+    data = (
+        b"\x80\x04\x8c\x08builtins\x8c\x07setattr\x93\x8c\x05torch\x8c\x06_utils\x93\x8c\x12_rebuild_tensor_v2\x8c\x02os\x87R0"
+        b"\x8c\x0ctorch._utils\x8c\x12_rebuild_tensor_v2\x93\x8c\x06system\x93N\x85R."
+    )
+    assert Global("unknown", "system", SafetyLevel.Dangerous) in scan_pickle_bytes(io.BytesIO(data), "setattr.pkl").globals
+
+
+def test_safe_imports_after_items_were_added_to_something_else_than_a_container():
+    # SETITEMS on a module calls its __setitem__, APPENDS its extend: arbitrary code, like a call, after which safe imports can
+    # return strings
+    data = (
+        b"\x80\x04\x8c\x08whatever\x8c\x06module\x93(\x8c\x01k\x8c\x01vu0"
+        b"\x8c\x0bcollections\x8c\x0bOrderedDict\x93)R\x8c\x06system\x93N\x85R."
+    )
+    assert Global("unknown", "system", SafetyLevel.Dangerous) in scan_pickle_bytes(io.BytesIO(data), "setitems.pkl").globals
+    # items added to actual containers are fine
+    data = b"\x80\x04}(\x8c\x01k\x8c\x01vu0\x8c\x0bcollections\x8c\x0bOrderedDict\x93)R\x8c\x06system\x93N\x85R."
+    assert Global("unknown", "system", SafetyLevel.Dangerous) not in scan_pickle_bytes(io.BytesIO(data), "dict.pkl").globals
+
+
+def test_safe_imports_imported_before_attributes_may_have_changed():
+    # collections.OrderedDict (a safe class) is kept in the memo, its __new__ replaced through BUILD, then it is called: its result
+    # can be a string
+    data = (
+        b"\x80\x04\x8c\x0bcollections\x8c\x0bOrderedDict\x93\x94N}\x8c\x07__new__\x8c\x08whatever\x8c\x01x\x93s\x86b0"
+        b"h\x00\x8c\x02os\x85R\x8c\x06system\x93N\x85R."
+    )
+    assert Global("unknown", "system", SafetyLevel.Dangerous) in scan_pickle_bytes(io.BytesIO(data), "class_override.pkl").globals
+
+
+def test_memo_follows_the_unpickler():
+    # A PROTO in the middle of a pickle is a no-op for the unpickler: the memo carries on, and MEMOIZE numbers slots after the
+    # ones already written. os.system must not read as collections.OrderedDict.
+    data = b"\x80\x04\x8c\x02os\x94\x8c\x06system\x9400" b"\x80\x04\x8c\x0bcollections\x94\x8c\x0bOrderedDict\x9400h\x00h\x01\x93N\x85R."
+    assert Global("os", "system", SafetyLevel.Dangerous) in scan_pickle_bytes(io.BytesIO(data), "mid_proto.pkl").globals
+    # FRAME has no effect on the stack: pickle.dumps can start a frame between a module name and a global name
+    data = pickle.dumps(["x" * 65513, OrderedDict()], protocol=4)
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(data), "framed.pkl"),
+        ScanResult([Global("collections", "OrderedDict", SafetyLevel.Innocuous)], 1, 0, 0),
+    )
+
+
+def test_memo_stores_top_of_stack():
+    """Memo writes store the value on top of the stack. After a GET or a POP, that is not the previous opcode's argument: resolving
+    STACK_GLOBAL operands through the memo must not turn os.system into an innocent-looking name."""
+    os_system = Global("os", "system", SafetyLevel.Dangerous)
+    # the values pushed by BINGET 0 / BINGET 1 are memoized again, then fetched for STACK_GLOBAL
+    after_get = b"\x80\x04\x8c\x02os\x94\x8c\x06system\x94h\x00\x94h\x01\x94h\x02h\x03\x93."
+    compare_scan_results(scan_pickle_bytes(io.BytesIO(after_get), "after_get.pkl"), ScanResult([os_system], 1, 1, 1))
+    # POP leaves 'os' on top of the stack, which MEMOIZE stores
+    after_pop = b"\x80\x04\x8c\x02os\x8c\x04junk0\x94\x8c\x06systemh\x00\x8c\x06system\x93."
+    compare_scan_results(scan_pickle_bytes(io.BytesIO(after_pop), "after_pop.pkl"), ScanResult([os_system], 1, 1, 1))
+
+
+def test_joblib_embedded_pickles_keep_their_own_memo():
+    """joblib writes object arrays as a complete pickle in the middle of the outer one, read with a fresh Unpickler: the outer
+    pickle's memo must not be overwritten by the embedded one's when resolving the outer pickle's imports."""
+    for protocol in (2, 3, 4, 5):
+        result = scan_file_path(f"{_root_path}/data2/joblib_object_array_p{protocol}.joblib")
+        assert result.issues_count == 0, (protocol, result.globals)
+        assert all("unknown" not in g.module and "unknown" not in g.name for g in result.globals), (protocol, result.globals)
+        assert Global("joblib.numpy_pickle", "NumpyArrayWrapper", SafetyLevel.Suspicious) in result.globals
+
+
+def _framed(frame: bytes, after: bytes = b"") -> bytes:
+    return b"\x80\x04\x95" + len(frame).to_bytes(8, "little") + frame + after
+
+
+_frame_violation = Global("unknown", "pickle frame boundary violation", SafetyLevel.Dangerous)
+
+
+def test_frame_boundary_violations_are_dangerous():
+    """The C unpickler drops the rest of a frame when an opcode runs past its end, and parses what follows the frame instead:
+    pickletools and the C unpickler then see different opcodes. pickle.dumps never writes such pickles."""
+    # pickletools sees a string then a BINBYTES swallowing the payload; the C unpickler (on io.BytesIO) sees os.system
+    payload = b"\x8c\x02os\x8c\x06system\x93\x8c\x02id\x85R."
+    after = b"Y" * 12 + b"B" + len(payload).to_bytes(4, "little") + payload + b"."
+    hidden_payload = _framed(b"\x8c\x11" + b"X" * 5, after)
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(hidden_payload), "hidden.pkl"), ScanResult([_frame_violation], 1, 1, 1, scan_err=True)
+    )
+
+    # a string read across the end of the frame: reported both as a frame violation and as the import pickletools reads
+    straddling = _framed(b"\x8c\x06socket\x94\x8c\x11c", b"reate_connection\x94\x93.")
+    result = scan_pickle_bytes(io.BytesIO(straddling), "straddling.pkl")
+    assert _frame_violation in result.globals and Global("socket", "create_connection", SafetyLevel.Dangerous) in result.globals
+    assert result.scan_err
+
+    # a frame starting inside another one, and STOP before the end of the frame
+    nested = _framed(b"\x95" + (1).to_bytes(8, "little") + b"N" + b"N", b".")
+    early_stop = _framed(b"N.N.")  # the next pickle.load on the same file starts after the frame, not after the first STOP
+    for data in (nested, early_stop):
+        result = scan_pickle_bytes(io.BytesIO(data), "frames.pkl")
+        assert _frame_violation in result.globals and result.scan_err, data
+
+
+def test_framed_pickles_from_pickle_dumps_are_not_flagged():
+    for protocol in (4, 5):
+        # several frames, plus large bytes written outside of frames
+        data = pickle.dumps([{"k": i, "s": "x" * 100} for i in range(5000)] + [b"y" * 200_000, OrderedDict(a=1)], protocol=protocol)
+        assert data.count(b"\x95") > 2
+        compare_scan_results(
+            scan_pickle_bytes(io.BytesIO(data), "framed.pkl"),
+            ScanResult([Global("collections", "OrderedDict", SafetyLevel.Innocuous)], 1, 0, 0),
+        )
 
 
 def test_scan_file_path_legacy_pytorch_magic_in_pickle_file(tmp_path):
@@ -1169,7 +1290,7 @@ def test_scan_directory_path():
             Global("collections", "OrderedDict", SafetyLevel.Innocuous),
             Global("torch._utils", "_rebuild_tensor_v2", SafetyLevel.Innocuous),
             Global("torch", "FloatStorage", SafetyLevel.Innocuous),
-            Global("_rebuild_tensor", "unknown", SafetyLevel.Dangerous),
+            Global("unknown", "unknown", SafetyLevel.Dangerous),  # sys_module_override_sploit.pkl
             Global("torch._utils", "_rebuild_tensor", SafetyLevel.Suspicious),
             Global("torch", "_utils", SafetyLevel.Suspicious),
             Global("__builtin__", "exec", SafetyLevel.Dangerous),
