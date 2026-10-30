@@ -24,21 +24,49 @@ picklescan --huggingface ykilcher/totally-harmless-model
 ```
 The scanner reports that the Pickle is calling `eval()` to execute arbitrary code:
 ```bash
-https://huggingface.co/ykilcher/totally-harmless-model/resolve/main/pytorch_model.bin:archive/data.pkl: global import '__builtin__ eval' FOUND
+https://huggingface.co/ykilcher/totally-harmless-model/resolve/main/pytorch_model.bin (archive/data.pkl): dangerous import __builtin__.eval FOUND
 ----------- SCAN SUMMARY -----------
 Scanned files: 1
 Infected files: 1
+Suspicious globals: 0
 Dangerous globals: 1
+Scan errors: 0
+Not scanned: 0
 ```
 
-The scanner can also load Pickles from local files, directories, URLs, and zip archives (a-la [PyTorch](https://pytorch.org/)):
+The scanner can also load Pickles from local files, directories, URLs, and archives:
 ```bash
 picklescan --path downloads/pytorch_model.bin
 picklescan --path downloads
 picklescan --url https://huggingface.co/sshleifer/tiny-distilbert-base-cased-distilled-squad/resolve/main/pytorch_model.bin
 ```
 
-To scan Numpy's `.npy` files, pip install the `numpy` package first.
+## What gets scanned
+
+Files are recognized by their content, not their extension:
+- Pickle files, including protocol 0 and 1 pickles (which have no magic bytes) and files holding several pickles
+- PyTorch files: zip files written by `torch.save` (the `data.pkl` pickle) and legacy files (a sequence of pickles)
+- NumPy `.npy` and `.npz` files (arrays of Python objects are pickles; NumPy itself is not needed)
+- joblib files, including the array data joblib writes between pickle opcodes
+- Compressed files: gzip, bz2, xz, lzma and zlib (joblib, `pandas.read_pickle`), plus zstd and lz4 when a decompressor is installed
+- Archives: zip, tar (also compressed: `.tar.gz`...) and 7z (`pip install picklescan[7z]`). The members of an archive are scanned like
+  files of their own, and archives found among them are reported as not scanned rather than opened (see limits below).
+
+Directories and Hugging Face repositories are scanned file by file, whatever the file names. Remote files are read with HTTP range
+requests, so only the parts a scan needs are downloaded: a file that is not a pickle costs a few small requests (its start, and
+its end to look for a zip archive), not a download.
+
+Text often parses as a few pickle opcodes before failing (Python source, for instance): for content without pickle magic bytes
+that fails to parse, imports whose names Python could not import are not reported.
+
+### What a clean result means
+
+picklescan reads files the way the standard loaders do (`pickle.load` with CPython's unpicklers, `torch.load`, `np.load`,
+`joblib.load`, `pandas.read_pickle`), and reports the imports they would make. A clean result means that no dangerous import was
+found where those loaders look. Payloads outside of that are checked on a best-effort basis, or not at all: data a standard loader
+does not read (after the end of what it reads, in archives nested deeper than the limits...), files read by custom loading code,
+or formats other than the ones above. Treat a clean result as a statement about the standard loaders, not about every way a file
+could be opened.
 
 ## Usage
 
@@ -47,7 +75,39 @@ To scan Numpy's `.npy` files, pip install the `numpy` package first.
 The scanner exit status codes are (a-la [ClamAV](https://www.clamav.net/)):
 - `0`: scan did not find malware
 - `1`: scan found malware
-- `2`: scan failed
+- `2`: scan failed (part of the content could not be scanned), whether or not it found malware
+
+### Scan errors
+
+When part of the content cannot be scanned, the scan goes on with the rest and reports what was not scanned, where, and why:
+```
+error[parse]: unknown opcode b'\xff' at position 40
+ --> model.zip (archive/data.pkl), offset 40
+  = note: imports found up to this point are reported; what follows was not scanned
+
+skipped: zip archive nested in another archive: not opened (ScanLimits.max_archive_depth)
+ --> model.zip (inner.zip)
+```
+
+From Python, `ScanResult.errors` and `ScanResult.skipped` hold the same information (kind, location, offset, message), and each
+`Global` found has a `location` too.
+
+### Limits
+
+Scans are bounded so that a small crafted file cannot make them do much more work than its size suggests, or fill memory or
+disk (`picklescan.scanner.ScanLimits`): archive nesting depth (1 by default), number of archive members, decompressed size, nested
+compression, and NumPy header size. Large pickle arguments (tensor data pickled in-band, for instance) are skipped rather than
+loaded into memory.
+
+### Telling file formats apart
+
+`picklescan.scanner.detect_file` and `detect_file_path` tell what a file contains, including the content of archives and compressed
+files, without scanning it.
+
+### Colors
+
+On a terminal, the output is colored, unless the `NO_COLOR` environment variable is set. `--color always` or `never` decides
+regardless of the terminal, as does `FORCE_COLOR`.
 
 ### Filtering files and directories
 

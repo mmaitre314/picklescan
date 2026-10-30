@@ -14,7 +14,7 @@ import pickletools
 import re
 import tarfile
 from tempfile import TemporaryDirectory, TemporaryFile
-from typing import IO, List, Optional, Set, Tuple
+from typing import IO, Callable, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
 import zlib
@@ -77,6 +77,20 @@ class ScanErrorKind(Enum):
     INTERNAL = "internal"  # unexpected error in picklescan itself
 
 
+def _plain(text: str, *styles: str) -> str:
+    return text
+
+
+def _printable(text: str) -> str:
+    """text with control and formatting characters (escape sequences, newlines, bidirectional overrides...) escaped: names and
+    messages come from the scanned files, and must not be able to change what a terminal shows."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode("ascii") for c in text)
+
+
+# Extra attributes of the log records of dangerous findings (see cli)
+_dangerous = {"picklescan_dangerous": True}
+
+
 # What each kind of error means for the scan result
 _error_help = {
     ScanErrorKind.PARSE: "imports found up to this point are reported; what follows was not scanned",
@@ -106,10 +120,14 @@ class ScanError:
     def file_id(self) -> str:
         return str(self.location)
 
-    def format(self) -> str:
-        """Multi-line description, in the style of compiler diagnostics."""
-        where = self.location.describe() + (f", offset {self.offset}" if self.offset is not None else "")
-        return f"error[{self.kind.value}]: {self.message}\n --> {where}\n  = note: {self.help}"
+    def format(self, style: Callable[..., str] = _plain) -> str:
+        """Multi-line description, in the style of compiler diagnostics. style(text, *styles) can add colors (see cli)."""
+        where = _printable(self.location.describe()) + (f", offset {self.offset}" if self.offset is not None else "")
+        return (
+            f"{style(f'error[{self.kind.value}]', 'red', 'bold')}{style(':', 'bold')} {style(_printable(self.message), 'bold')}\n"
+            f" {style('-->', 'cyan')} {where}\n"
+            f"  {style('= note:', 'cyan')} {self.help}"
+        )
 
 
 @dataclass
@@ -126,8 +144,9 @@ class SkippedFile:
     def file_id(self) -> str:
         return str(self.location)
 
-    def format(self) -> str:
-        return f"skipped: {self.reason}\n --> {self.location.describe()}"
+    def format(self, style: Callable[..., str] = _plain) -> str:
+        where = _printable(self.location.describe())
+        return f"{style('skipped', 'yellow', 'bold')}{style(':', 'bold')} {style(_printable(self.reason), 'bold')}\n {style('-->', 'cyan')} {where}"
 
 
 @dataclass
@@ -1657,17 +1676,19 @@ def _build_scan_result_from_raw_globals(
 
         if "unknown" in g.module or "unknown" in g.name:
             g.safety = SafetyLevel.Dangerous
-            _log.warning("%s: %s import %s.%s FOUND", location.describe(), g.safety.value, g.module, g.name)
+            _log.warning("%s: %s import %s.%s FOUND", location.describe(), g.safety.value, g.module, g.name, extra=_dangerous)
             issues_count += 1
         elif unsafe_filter is not None and (unsafe_filter == "*" or g.name in unsafe_filter):
             g.safety = SafetyLevel.Dangerous
-            _log.warning("%s: %s import %s.%s FOUND", location.describe(), g.safety.value, g.module, g.name)
+            _log.warning("%s: %s import %s.%s FOUND", location.describe(), g.safety.value, g.module, g.name, extra=_dangerous)
             issues_count += 1
         elif safe_filter is not None and (safe_filter == "*" or g.name in safe_filter):
             g.safety = SafetyLevel.Innocuous
         elif strict:
             g.safety = SafetyLevel.Dangerous
-            _log.warning("%s: %s import %s.%s FOUND (promoted by --strict)", location.describe(), g.safety.value, g.module, g.name)
+            _log.warning(
+                "%s: %s import %s.%s FOUND (promoted by --strict)", location.describe(), g.safety.value, g.module, g.name, extra=_dangerous
+            )
             issues_count += 1
         else:
             g.safety = SafetyLevel.Suspicious

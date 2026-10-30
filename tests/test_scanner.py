@@ -1978,6 +1978,39 @@ def test_text_is_not_reported_as_pickle(tmp_path):
     assert _finds_eval(result) and _error_kinds(result) == [ScanErrorKind.PARSE]
 
 
+def test_cli_colors():
+    import subprocess
+
+    command = [sys.executable, "-m", "picklescan", "-p", f"{_root_path}/data/malicious1_v4.pkl", "-g"]
+    env = {k: v for k, v in os.environ.items() if k not in ("NO_COLOR", "FORCE_COLOR")}
+    colored = subprocess.run(command + ["--color", "always"], capture_output=True, text=True, env=env).stdout
+    assert "\x1b[31;1m1\x1b[0m" in colored  # infected files count
+    assert "\x1b[31;1mdangerous\x1b[0m" in colored
+    # not a terminal (auto), NO_COLOR, or never: plain text
+    for extra, extra_env in (([], {}), ([], {"NO_COLOR": "1"}), (["--color", "never"], {})):
+        plain = subprocess.run(command + extra, capture_output=True, text=True, env={**env, **extra_env}).stdout
+        assert "\x1b[" not in plain and "Infected files: 1" in plain
+    forced = subprocess.run(command, capture_output=True, text=True, env={**env, "FORCE_COLOR": "1"}).stdout
+    assert "\x1b[" in forced
+
+
+def test_cli_escapes_what_files_contain(tmp_path):
+    import subprocess
+
+    # names from the scanned file can hold escape sequences and newlines: they must not reach the terminal as such
+    path = tmp_path / "escapes.pkl"
+    path.write_bytes(b"cos\x1b[2J\nsystem\x07\n.")
+    env = {k: v for k, v in os.environ.items() if k not in ("NO_COLOR", "FORCE_COLOR")}
+    for color in ("always", "never"):
+        command = [sys.executable, "-m", "picklescan", "-p", str(path), "-g", "--color", color]
+        output = subprocess.run(command, capture_output=True, text=True, env=env).stdout
+        assert "\x1b[2J" not in output and "\\x1b[2J" in output and "\x07" not in output and "\\x07" in output, output
+    # dangerous findings are colored from the log record, not from what the message says
+    command = [sys.executable, "-m", "picklescan", "-p", f"{_root_path}/data/malicious1_v4.pkl", "--color", "always"]
+    output = subprocess.run(command, capture_output=True, text=True, env=env).stdout
+    assert output.startswith("\x1b[31m") and "dangerous import" in output.splitlines()[0], output
+
+
 def test_main():
     argv = sys.argv
     try:
