@@ -87,8 +87,11 @@ class RelaxedZipFile(zipfile.ZipFile):
 
             zef = zipfile.ZipExtFile(zef_file, mode, zinfo, pwd, True)
 
-            # Disable CRC validation as PyTorch may not use it
+            # Disable CRC validation as PyTorch may not use it. Also clear the copy ZipExtFile keeps for rewinding (Python 3.12+):
+            # any backward seek outside the read buffer resets the member and restores the CRC from it, which would re-enable
+            # validation and raise BadZipFile on a member PyTorch loads fine.
             zef._expected_crc = None
+            zef._orig_crc = None
 
             return zef
         except BaseException:

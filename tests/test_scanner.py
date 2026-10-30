@@ -1,10 +1,12 @@
 import http.client
 import importlib
 import io
+import json
 import os
 import pickle
 import re
 import sys
+import zlib
 from typing import Union
 from unittest import TestCase
 
@@ -31,6 +33,7 @@ from picklescan.scanner import (
     scan_numpy,
     scan_pytorch,
 )
+from picklescan.relaxed_zipfile import RelaxedZipFile
 from picklescan.torch import MAGIC_NUMBER
 
 _root_path = os.path.dirname(__file__)
@@ -54,13 +57,31 @@ class Suspicious:
 
 
 class HTTPResponse:
-    def __init__(self, status, data=None):
+    def __init__(self, status, data=None, headers=None):
         self.status = status
         self.reason = "mock reason"
         self.data = data
+        self.headers = headers or {}
 
-    def read(self):
-        return self.data
+    def read(self, amt=None):
+        return self.data if amt is None else bytes(self.data[:amt])
+
+
+def _malicious_zip() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip:
+        zip.writestr("archive/data.pkl", pickle.dumps(Malicious1()))
+    return bytes(buffer.getbuffer())
+
+
+# Files of a mock Hugging Face repo, to check that files are picked by content rather than extension
+_sniffing_repo_files = {
+    "model": _malicious_zip(),  # extensionless PyTorch zip
+    "weights.data-00000": pickle.dumps(Malicious1()),  # unknown extension, pickle content
+    "model.safetensors": (640).to_bytes(8, "little") + b"x" * 1000,  # header length starts with \x80\x02, like a pickle
+    "README.md": b"# Totally harmless",
+}
+_sniffing_repo_requests = []
 
 
 class MockHTTPSConnection:
@@ -68,15 +89,33 @@ class MockHTTPSConnection:
         self.host = host
         self.response = None
 
-    def request(self, method, path_and_query):
+    def request(self, method, path_and_query, headers=None):
         assert self.response is None
         target = f"{method} https://{self.host}{path_and_query}"
-        if target == "GET https://localhost/mock/200":
+        sniffing_prefix = "GET https://huggingface.co/mock/sniffing-model/resolve/main/"
+        if target.startswith(sniffing_prefix):
+            name = target[len(sniffing_prefix) :]
+            range_header = (headers or {}).get("Range")
+            _sniffing_repo_requests.append((name, range_header))
+            data = _sniffing_repo_files[name]
+            if range_header is not None:
+                end = int(range_header.split("-")[1])
+                self.response = HTTPResponse(206, data[: end + 1])
+            else:
+                self.response = HTTPResponse(200, data)
+        elif target == "GET https://huggingface.co/api/models/mock/sniffing-model":
+            siblings = [{"rfilename": name} for name in _sniffing_repo_files]
+            self.response = HTTPResponse(200, json.dumps({"siblings": siblings}).encode())
+        elif target == "GET https://localhost/mock/200":
             self.response = HTTPResponse(200, b"mock123")
         elif target == "GET https://localhost/mock/400":
             self.response = HTTPResponse(400)
         elif target == "GET https://localhost/mock/pickle/benign":
             self.response = HTTPResponse(200, pickle.dumps({"a": 0, "b": 1, "c": 2}))
+        elif target == "GET https://localhost/mock/redirect/relative":  # like Hugging Face's small files
+            self.response = HTTPResponse(307, b"", {"Location": "/mock/pickle/malicious"})
+        elif target == "GET https://localhost/mock/redirect/loop":
+            self.response = HTTPResponse(302, b"", {"Location": "/mock/redirect/loop"})
         elif target == "GET https://localhost/mock/pickle/malicious":
             self.response = HTTPResponse(200, pickle.dumps(Malicious2()))
         elif target == "GET https://localhost/mock/zip/benign":
@@ -133,6 +172,7 @@ def compare_scan_results(sr1: ScanResult, sr2: ScanResult):
     assert sr1.scanned_files == sr2.scanned_files
     assert sr1.issues_count == sr2.issues_count
     assert sr1.infected_files == sr2.infected_files
+    assert sr1.scan_err == sr2.scan_err
     test_case.assertCountEqual(sr1.globals, sr2.globals)
 
 
@@ -936,6 +976,47 @@ def test_stack_global_underflow_keeps_found_globals():
     compare_scan_results(result, ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1, scan_err=True))
 
 
+def test_stack_global_underflow_in_valid_pickle_is_flagged_and_scan_continues():
+    # The unpickler rejects this first pickle, so it is a scan error, not "not a pickle"; later pickles are still scanned
+    malformed = b"\x80\x04\x93."
+    compare_scan_results(scan_pickle_bytes(io.BytesIO(malformed), "malformed.pkl"), ScanResult([], 1, 0, 0, scan_err=True))
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(malformed + pickle.dumps(Malicious1())), "malformed_then_malicious.pkl"),
+        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1, scan_err=True),
+    )
+    # same within a single pickle: the STACK_GLOBAL after the malformed one is still extracted
+    single = b"\x80\x04\x93\x8c\x08builtins\x8c\x04eval\x93."
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(single), "single.pkl"),
+        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1, scan_err=True),
+    )
+
+
+def test_scan_pickle_bytes_large_arguments_stay_out_of_memory():
+    """Weights pickled in-band are huge opcode arguments: scanning must not hold them, nor the list of opcodes, in memory."""
+    import tracemalloc
+
+    payload = io.BytesIO(pickle.dumps([b"\x00" * (50 << 20), bytearray(b"\x01" * (50 << 20)), Malicious1()], protocol=5))
+    tracemalloc.start()
+    try:
+        result = scan_pickle_bytes(payload, "weights.pkl")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    compare_scan_results(result, ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1))
+    assert peak < 8 << 20, f"peak memory {peak / 2**20:.1f} MiB"
+
+
+def test_skipped_bytes_argument_as_stack_global_operand():
+    # A large bytes argument is not kept in memory; resolved through the memo as a STACK_GLOBAL operand it reads as "unknown"
+    blob = b"B" + (5000).to_bytes(4, "little") + b"x" * 5000
+    data = b"\x80\x04" + blob + b"\x94" + b"\x8c\x0bcollections" + b"h\x00" + b"\x93."
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(data), "skipped_operand.pkl"),
+        ScanResult([Global("collections", "unknown", SafetyLevel.Dangerous)], 1, 1, 1),
+    )
+
+
 def test_scan_file_path_legacy_pytorch_magic_in_pickle_file(tmp_path):
     # The legacy PyTorch magic number is attacker-controlled; it must not downgrade a .pkl file to the capped legacy PyTorch scan,
     # which would stop before the payload hidden after five benign pickles
@@ -990,6 +1071,71 @@ def test_scan_nested_7z_archives():
     result = scan_bytes(io.BytesIO(_nested_7z(12)), "nested.7z", ".7z")
     assert result.globals == []
     assert result.scan_err is True
+
+
+def _zip_bytes(members, compression=zipfile.ZIP_STORED) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression) as zip:
+        for name, data in members:
+            zip.writestr(name, data)
+    return buffer.getvalue()
+
+
+def test_scan_bytes_pickle_zip_polyglots():
+    """zipfile finds an archive from its end record and ignores what precedes it, while pickle/numpy/PyTorch loaders read from the
+    first byte: when both are present, both must be scanned."""
+
+    def finds_eval(result: ScanResult) -> bool:
+        # protocol 0-2 pickles name the builtins module __builtin__
+        return result.infected_files == 1 and any(g.name == "eval" and g.safety == SafetyLevel.Dangerous for g in result.globals)
+
+    benign_zip = _zip_bytes([("data.pkl", pickle.dumps({"a": 1}))])
+    malicious_zip = _zip_bytes([("data.pkl", pickle.dumps(Malicious1()))])
+    with open(f"{_root_path}/data2/object_array.npy", "rb") as f:
+        npy_bytes = f.read()
+
+    for ext in (".pkl", ".zip", ".npy", ".pt", None):
+        for protocol in (0, 4):  # protocol 0 has no PROTO opcode, so no pickle magic bytes
+            # pickle.load / legacy torch.load run the pickle in front of the zip
+            assert finds_eval(scan_bytes(io.BytesIO(pickle.dumps(Malicious1(), protocol=protocol) + benign_zip), "polyglot", ext))
+            # zipfile-based loaders run the zip behind the pickle
+            assert finds_eval(scan_bytes(io.BytesIO(pickle.dumps({"a": 1}, protocol=protocol) + malicious_zip), "polyglot", ext))
+        # same behind a NumPy file
+        assert finds_eval(scan_bytes(io.BytesIO(npy_bytes + malicious_zip), "polyglot", ext))
+
+
+def test_scan_bytes_plain_zip_scanned_once():
+    compare_scan_results(
+        scan_bytes(io.BytesIO(_zip_bytes([("data.pkl", pickle.dumps(Malicious1()))])), "plain.zip", ".zip"),
+        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1),
+    )
+
+
+def _corrupt_crc(zip_data: bytes, member_data: bytes) -> bytes:
+    crc = zlib.crc32(member_data).to_bytes(4, "little")
+    assert zip_data.count(crc) == 2  # local file header + central directory
+    return zip_data.replace(crc, (zlib.crc32(member_data) ^ 0xFFFFFFFF).to_bytes(4, "little"))
+
+
+def test_scan_zip_bytes_corrupt_crc_with_trailing_data():
+    """PyTorch ignores zip CRCs and stops unpickling at STOP: a bad CRC and bytes after the pickle must not hide its globals."""
+    for compression in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        for trailer, scan_err in ((b"", False), (b"X", True), (b"X" * 100, True)):
+            member = pickle.dumps(Malicious1()) + trailer
+            zip_data = _corrupt_crc(_zip_bytes([("archive/data.pkl", member)], compression), member)
+            compare_scan_results(
+                scan_zip_bytes(io.BytesIO(zip_data), "corrupt_crc.zip"),
+                ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1, scan_err=scan_err),
+            )
+
+
+def test_relaxed_zipfile_crc_stays_disabled_after_rewind():
+    member = b"x" * 100_000
+    zip_data = _corrupt_crc(_zip_bytes([("member", member)]), member)
+    with RelaxedZipFile(io.BytesIO(zip_data)) as zip, zip.open("member") as file:
+        assert file.read() == member
+        file.seek(0)  # resets the member: on Python 3.12+ this used to restore the CRC check
+        assert file.read() == member
 
 
 def test_scan_directory_path():
@@ -1063,6 +1209,30 @@ def test_scan_directory_path():
     compare_scan_results(scan_directory_path(f"{_root_path}/data/"), sr)
 
 
+def test_http_redirects():
+    assert _http_get("https://localhost/mock/redirect/relative") == pickle.dumps(Malicious2())
+    with pytest.raises(RuntimeError, match="too many redirections"):
+        _http_get("https://localhost/mock/redirect/loop")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_scan_directory_path_skips_special_files(tmp_path):
+    (tmp_path / "a.pkl").write_bytes(pickle.dumps(Malicious1()))
+    os.mkfifo(tmp_path / "pipe.pkl")  # opening it would block until something writes to it
+    (tmp_path / "broken.pkl").symlink_to(tmp_path / "missing")
+    compare_scan_results(scan_directory_path(str(tmp_path)), ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1))
+
+
+def test_scan_zip_bytes_corrupted_after_payload():
+    # Loaders reading a member as a stream run what precedes the corruption: it is scanned, and the scan is flagged
+    member = pickle.dumps([Malicious1(), bytes(range(256)) * 20_000])
+    zip_data = bytearray(_zip_bytes([("data.pkl", member)], zipfile.ZIP_DEFLATED))
+    zip_data[len(zip_data) // 2 : len(zip_data) // 2 + 64] = b"\xff" * 64
+    result = scan_zip_bytes(io.BytesIO(bytes(zip_data)), "corrupt.zip")
+    assert Global("builtins", "eval", SafetyLevel.Dangerous) in result.globals
+    assert result.scan_err
+
+
 def test_scan_url():
     safe = ScanResult([], 1, 0, 0)
     compare_scan_results(scan_url("https://localhost/mock/pickle/benign"), safe)
@@ -1078,6 +1248,34 @@ def test_scan_url():
 def test_scan_huggingface_model():
     eval_sr = ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
     compare_scan_results(scan_huggingface_model("ykilcher/totally-harmless-model"), eval_sr)
+
+
+def test_scan_huggingface_model_by_content():
+    _sniffing_repo_requests.clear()
+    result = scan_huggingface_model("mock/sniffing-model")
+    compare_scan_results(result, ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)] * 2, 2, 2, 2))
+    # every file is probed with a ranged request, and only the ones that look scannable are downloaded in full
+    full_downloads = sorted(name for name, range_header in _sniffing_repo_requests if range_header is None)
+    probes = sorted(name for name, range_header in _sniffing_repo_requests if range_header is not None)
+    assert full_downloads == ["model", "weights.data-00000"]
+    assert probes == sorted(_sniffing_repo_files)
+
+
+def test_scan_directory_path_by_content(tmp_path):
+    for name, data in _sniffing_repo_files.items():
+        (tmp_path / name).write_bytes(data)
+    with open(f"{_root_path}/data2/object_array.npy", "rb") as f:
+        (tmp_path / "array.npy").write_bytes(f.read())  # .npy files used to be skipped by directory scans
+    (tmp_path / "array_without_extension").write_bytes((tmp_path / "array.npy").read_bytes())
+    numpy_globals = [
+        Global("numpy.core.multiarray", "_reconstruct", SafetyLevel.Innocuous),
+        Global("numpy", "ndarray", SafetyLevel.Innocuous),
+        Global("numpy", "dtype", SafetyLevel.Innocuous),
+    ]
+    compare_scan_results(
+        scan_directory_path(str(tmp_path)),
+        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)] * 2 + numpy_globals * 2, 4, 2, 2),
+    )
 
 
 def test_main():
