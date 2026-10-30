@@ -91,6 +91,22 @@ def _printable(text: str) -> str:
 _dangerous = {"picklescan_dangerous": True}
 
 
+class Severity(Enum):
+    ERROR = "error"  # part of the content could not be checked: the file cannot be vouched for
+    WARNING = "warning"  # something worth knowing that does not leave loadable content unchecked
+
+
+class Verdict(Enum):
+    SAFE = "safe"  # no dangerous import, and nothing blocking left unchecked
+    UNSAFE = "unsafe"  # dangerous imports found
+    UNVERIFIED = "unverified"  # no dangerous import found, but part of the content could not be checked
+
+
+# Default severity of each kind of error. UNSUPPORTED marks formats their own loader cannot read either (a .npy version NumPy
+# does not know): nothing there can be loaded, nor scanned. Everything else leaves content a loader could read unchecked.
+_default_severity = {kind: Severity.ERROR for kind in ScanErrorKind}
+_default_severity[ScanErrorKind.UNSUPPORTED] = Severity.WARNING
+
 # What each kind of error means for the scan result
 _error_help = {
     ScanErrorKind.PARSE: "imports found up to this point are reported; what follows was not scanned",
@@ -110,11 +126,14 @@ class ScanError:
     message: str
     offset: Optional[int] = None  # byte offset in the (decompressed) content, where known
     help: Optional[str] = None
+    severity: Optional[Severity] = None
 
     def __post_init__(self):
         self.location = _location(self.location)
         if self.help is None:
             self.help = _error_help[self.kind]
+        if self.severity is None:
+            self.severity = _default_severity[self.kind]
 
     @property
     def file_id(self) -> str:
@@ -124,7 +143,8 @@ class ScanError:
         """Multi-line description, in the style of compiler diagnostics. style(text, *styles) can add colors (see cli)."""
         where = _printable(self.location.describe()) + (f", offset {self.offset}" if self.offset is not None else "")
         return (
-            f"{style(f'error[{self.kind.value}]', 'red', 'bold')}{style(':', 'bold')} {style(_printable(self.message), 'bold')}\n"
+            f"{style(f'{self.severity.value}[{self.kind.value}]', 'red' if self.severity is Severity.ERROR else 'yellow', 'bold')}"
+            f"{style(':', 'bold')} {style(_printable(self.message), 'bold')}\n"
             f" {style('-->', 'cyan')} {where}\n"
             f"  {style('= note:', 'cyan')} {self.help}"
         )
@@ -155,20 +175,31 @@ class ScanResult:
     scanned_files: int = 0
     issues_count: int = 0
     infected_files: int = 0
-    # True when the scan is incomplete: see errors for what failed and why
+    # True when the scan is incomplete, that is when it has errors of severity ERROR: see errors for what failed and why
     scan_err: bool = False
     suspicious_count: int = 0
     errors: List[ScanError] = field(default_factory=list)
     skipped: List[SkippedFile] = field(default_factory=list)
 
     def __post_init__(self):
-        if self.errors:
+        if any(e.severity is Severity.ERROR for e in self.errors):
             self.scan_err = True
 
     def add_error(self, file_id, kind: ScanErrorKind, message: str, offset: Optional[int] = None) -> "ScanResult":
-        self.errors.append(ScanError(_location(file_id), kind, message, offset))
-        self.scan_err = True
+        error = ScanError(_location(file_id), kind, message, offset)
+        self.errors.append(error)
+        self.scan_err = self.scan_err or error.severity is Severity.ERROR
         return self
+
+    def verdict(self, blocking: Optional[Set[ScanErrorKind]] = None) -> Verdict:
+        """Overall outcome. blocking: the kinds of errors that leave the file unverified (default: those of severity ERROR)."""
+        if self.issues_count > 0:
+            return Verdict.UNSAFE
+        if any((e.kind in blocking) if blocking is not None else e.severity is Severity.ERROR for e in self.errors):
+            return Verdict.UNVERIFIED
+        if blocking is None and self.scan_err and not self.errors:
+            return Verdict.UNVERIFIED  # incomplete, without saying why (a result built by the caller)
+        return Verdict.SAFE
 
     def merge(self, sr: "ScanResult"):
         self.globals.extend(sr.globals)
@@ -246,8 +277,9 @@ class _MissingDependency(Exception):
 class _ScanContext:
     """State shared by everything one scan opens: settings, limits, the work done so far and the results."""
 
-    def __init__(self, strict: bool = False, limits: Optional[ScanLimits] = None, scan: bool = True):
+    def __init__(self, strict: bool = False, limits: Optional[ScanLimits] = None, scan: bool = True, every_file: bool = False):
         self.strict = strict
+        self.every_file = every_file  # scanning every file of a directory or repository, rather than a file of the caller's choice
         self.limits = limits or ScanLimits()
         self.scan = scan  # False: only detect formats (detect_file)
         self.result = ScanResult([])
@@ -296,10 +328,11 @@ class ScanFilter:
 
 
 class GenOpsError(Exception):
-    def __init__(self, msg: str, globals: Optional[Set[Tuple[str, str]]], offset: Optional[int] = None):
+    def __init__(self, msg: str, globals: Optional[Set[Tuple[str, str]]], offset: Optional[int] = None, read_error_kind=None):
         self.msg = msg
         self.globals = globals
         self.offset = offset
+        self.read_error_kind = read_error_kind  # set when the data could not be read (corrupted compressed data, I/O error...)
         super().__init__()
 
     def __str__(self) -> str:
@@ -477,6 +510,16 @@ _numpy_file_extensions = {".npy"}  # Note: .npz is handled as zip files
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data"}
 _zip_file_extensions = {".zip", ".npz", ".7z", ".tar", ".tgz"}
+# Text and source files, which standard loaders do not unpickle. Unless they hold pickle magic bytes, they are not parsed as
+# pickles when every file of a directory or repository is scanned, nor as archive members: text parses as a few opcodes before
+# failing ("import os" reads as INST importing "mport os"), which would be reported. A file scanned on its own is always parsed.
+_text_file_extensions = {
+    ".py", ".pyi", ".pyx", ".pxd", ".c", ".h", ".cc", ".cpp", ".hpp", ".cu", ".f90", ".rs", ".go", ".java", ".js", ".ts", ".jsx",
+    ".tsx", ".css", ".html", ".htm", ".xml", ".svg", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".md", ".rst",
+    ".txt", ".csv", ".tsv", ".sh", ".bat", ".ps1", ".jinja", ".j2", ".ipynb", ".lock", ".log", ".gitattributes", ".gitignore",
+}  # fmt: skip
+_text_file_names = {"license", "readme", "notice", "copying", "authors", "changelog", "makefile", "dockerfile", "record", "metadata",
+                    "wheel", "installer", "requested"}  # fmt: skip
 _compressed_file_extensions = {".gz", ".bz2", ".xz", ".lzma", ".z", ".zst", ".lz4", ".tgz"}
 # Read buffer wrapped around zip members: pickletools reads opcode by opcode, and ZipExtFile.read has a high per-call cost
 _zip_member_buffer_size = 1 << 16
@@ -713,9 +756,9 @@ class _RemoteFile(io.RawIOBase):
         super().close()
 
 
-def _scan_remote_file(url: str, file_ext: Optional[str], strict: bool, limits: Optional[ScanLimits]) -> ScanResult:
+def _scan_remote_file(url: str, file_ext: Optional[str], strict: bool, limits: Optional[ScanLimits], every_file=False) -> ScanResult:
     with _RemoteFile(url) as raw, io.BufferedReader(raw, 1 << 16) as file:
-        return scan_bytes(file, url, file_ext, strict=strict, limits=limits)
+        return _scan(file, url, file_ext, strict, limits, every_file)
 
 
 class _OpcodeError(ValueError):
@@ -724,6 +767,20 @@ class _OpcodeError(ValueError):
     def __init__(self, position: int, message: str):
         super().__init__(message)
         self.position = position
+
+
+class _ReadError(_OpcodeError):
+    """The data could not be read, which is no sign it is not a pickle: corrupted compressed data, I/O errors..."""
+
+    def __init__(self, position: int, error: Exception):
+        decompression = (zlib.error, lzma.LZMAError, EOFError, gzip.BadGzipFile, zipfile.BadZipFile)
+        self.kind = ScanErrorKind.ARCHIVE if isinstance(error, decompression) or "data stream" in str(error) else ScanErrorKind.IO
+        what = "decompression" if self.kind is ScanErrorKind.ARCHIVE else "reading"
+        super().__init__(position, f"{what} failed while reading the opcode at position {position}: {error}")
+
+
+# Errors raised by the stream being read, as opposed to the parsing of what it holds
+_read_errors = (OSError, EOFError, zlib.error, lzma.LZMAError, zipfile.BadZipFile)
 
 
 class _SkippedBytes:
@@ -876,6 +933,26 @@ def _number_line_arg_reader(parse):
     return reader
 
 
+class _ModuleAndName(str):
+    """GLOBAL and INST arguments: "module name" like pickletools, also keeping the two lines apart, since names can hold spaces."""
+
+    def __new__(cls, module: str, name: str):
+        value = super().__new__(cls, f"{module} {name}")
+        value.pair = (module, name)
+        return value
+
+
+def _read_module_and_name(f: IO[bytes]) -> _ModuleAndName:
+    """Both unpicklers decode GLOBAL and INST lines as UTF-8 (pickletools only does from Python 3.12, ASCII before)."""
+    lines = []
+    for _ in range(2):
+        line = f.readline()
+        if not line.endswith(b"\n"):
+            raise ValueError("no newline found when trying to read stringnl")
+        lines.append(line[:-1].decode("utf-8"))
+    return _ModuleAndName(*lines)
+
+
 def _line_arg_reader(read_from_lines, line_count: int = 1):
     """The pickletools reader for a newline-terminated argument (protocol 0), fed lines read with a bounded size."""
 
@@ -919,7 +996,7 @@ _counted_arg_readers = {
     ),
     pickletools.stringnl: _line_arg_reader(pickletools.read_stringnl),
     pickletools.stringnl_noescape: _line_arg_reader(pickletools.read_stringnl_noescape),
-    pickletools.stringnl_noescape_pair: _line_arg_reader(pickletools.read_stringnl_noescape_pair, line_count=2),
+    pickletools.stringnl_noescape_pair: _line_arg_reader(_read_module_and_name, line_count=2),
     pickletools.unicodestringnl: _line_arg_reader(pickletools.read_unicodestringnl),
     pickletools.decimalnl_short: _number_line_arg_reader(_parse_int_line),
     pickletools.decimalnl_long: _number_line_arg_reader(_parse_long_line),
@@ -958,7 +1035,10 @@ def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None, jobli
     pos = data.tell()
     read = data.read
     while True:
-        code = read(1)
+        try:
+            code = read(1)
+        except _read_errors as e:
+            raise _ReadError(pos, e) from e
         entry = _opcode_table.get(code)
         if entry is None:
             if code == b"":
@@ -977,6 +1057,8 @@ def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None, jobli
                 end_pos = pos + 1 + size
         except (_LimitExceeded, _MissingDependency):
             raise
+        except _read_errors as e:
+            raise _ReadError(pos, e) from e
         except Exception as e:
             raise _OpcodeError(pos, f"invalid argument for {opcode.name} at position {pos}: {e}") from e
 
@@ -1037,6 +1119,8 @@ class _KnownImport(tuple):
 
 def _global_arg(arg) -> Tuple[str, str]:
     """What a GLOBAL or INST imports: a line too long to be kept (_SkippedBytes) imports something unknown."""
+    if isinstance(arg, _ModuleAndName):
+        return arg.pair
     return tuple(arg.split(" ", 1)) if isinstance(arg, str) else (_unknown, _unknown)
 
 
@@ -1642,6 +1726,9 @@ def _read_globals(data: IO[bytes], multiple_pickles: bool, joblib_reads: Optiona
             _log.debug(f"Error parsing pickle: {e}", exc_info=True)
             parsing_pkl_error = str(e)
             error_offset = e.position if isinstance(e, _OpcodeError) else None
+            if isinstance(e, _ReadError):
+                # Not a sign that this is not a pickle: report it, with whatever was found so far
+                raise GenOpsError(parsing_pkl_error, globals, error_offset, read_error_kind=e.kind)
         else:
             if enclosing:
                 resumed = enclosing.pop()  # second reading: the embedded pickle is done, the enclosing one resumes
@@ -1734,10 +1821,6 @@ def _build_scan_result_from_raw_globals(
     return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, scan_err, suspicious_count)
 
 
-def _importable_name(name: str) -> bool:
-    return all(part.isidentifier() for part in name.split("."))
-
-
 def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=False, _without_magic=False) -> ScanResult:
     """Disassemble a Pickle stream and report issues"""
     _log.debug(f"scan_pickle_bytes({file_id})")
@@ -1745,12 +1828,21 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=Fa
     try:
         raw_globals = _list_globals(data, multiple_pickles)
     except GenOpsError as e:
+        if e.read_error_kind is not None:
+            result = _build_scan_result_from_raw_globals(e.globals or set(), file_id, strict=strict)
+            _log.error(f"{_location(file_id).describe()}: {e}", extra=_reported)
+            return result.add_error(file_id, e.read_error_kind, str(e), e.offset)
         if e.globals is not None and _without_magic:
-            # Content without pickle magic bytes that fails to parse is most likely not a pickle at all: text such as Python
-            # source parses as a few opcodes ("import os" reads as INST importing "mport os") before failing. Imports with names
-            # the import system cannot resolve are dropped; unknown operands and frame violations are kept.
-            kept = {g for g in e.globals if g == _frame_violation_global or (_importable_name(g[0]) and _importable_name(g[1]))}
-            e.globals = kept or None
+            # Content without pickle magic bytes that fails to parse is most likely not a pickle: text parses as a few opcodes
+            # before failing ("import os" reads as INST importing "mport os"). Only what would be dangerous (suspicious too, with
+            # strict) is reported, with the error; otherwise it is "not a pickle".
+            result = _build_scan_result_from_raw_globals(e.globals, file_id, strict=strict)
+            dangerous = [g for g in result.globals if g.safety is SafetyLevel.Dangerous]
+            if not dangerous:
+                _log.debug(f"{_location(file_id).describe()}: not a pickle ({e})")
+                return ScanResult([], scanned_files=1, scan_err=False)
+            _log.error(f"{_location(file_id).describe()}: error parsing pickle: {e}", extra=_reported)
+            return ScanResult(dangerous, 1, len(dangerous), 1).add_error(file_id, ScanErrorKind.PARSE, str(e), e.offset)
         if e.globals is not None:
             # Found some globals before error - could be a malicious partial pickle
             _log.error(
@@ -2234,6 +2326,8 @@ def _walk_format(data, info: FileInfo, file_ext, ctx: _ScanContext, depth: int, 
     elif fmt is FileFormat.PYTORCH_LEGACY:
         if ctx.scan:
             ctx.result.merge(_scan_pytorch_legacy(data, file_id, ctx))
+    elif ctx.scan and fmt is FileFormat.UNKNOWN and ctx.every_file and not file_id.members and _is_text_file(file_id):
+        _log.debug(f"{file_id.describe()}: text file without pickle magic bytes, not parsed as a pickle")
     elif ctx.scan:
         # PICKLE, and UNKNOWN: protocol 0 and 1 pickles have no magic bytes. Data that is not a pickle fails to parse before any
         # import, which is reported as "not a pickle" rather than as an error.
@@ -2249,6 +2343,11 @@ def _walk_format(data, info: FileInfo, file_ext, ctx: _ScanContext, depth: int, 
             ctx.result.merge(_error_result(file_id, ScanErrorKind.ARCHIVE, message, 0))
     elif fmt is FileFormat.UNKNOWN:
         info.format, info.pickle_protocol = _classify_pickle(data)
+
+
+def _is_text_file(location: Location) -> bool:
+    name = os.path.basename(location.members[-1] if location.members else location.file).lower()
+    return os.path.splitext(name)[1] in _text_file_extensions or name in _text_file_names or name in _text_file_extensions
 
 
 def _walk_archive(data, info: FileInfo, ctx: _ScanContext, depth: int, walk_members, extra_level: bool = False) -> FileInfo:
@@ -2394,14 +2493,19 @@ def _scan_pytorch_legacy(data: IO[bytes], file_id: str, ctx: _ScanContext) -> Sc
     storage keys), then raw storage data that is not a pickle."""
     scan_result = ScanResult([])
     for _ in range(5):
-        scan_result.merge(scan_pickle_bytes(data, file_id, multiple_pickles=False, strict=ctx.strict))
+        result = scan_pickle_bytes(data, file_id, multiple_pickles=False, strict=ctx.strict)
+        scan_result.merge(result)
+        if any(e.kind in (ScanErrorKind.ARCHIVE, ScanErrorKind.IO) for e in result.errors):
+            break  # torch.load stops there too: what follows could not be read anyway
     scan_result.scanned_files = 1
     scan_result.infected_files = min(1, scan_result.infected_files)
     return scan_result
 
 
-def _scan(data: IO[bytes], file_id: str, file_ext: Optional[str], strict: bool, limits: Optional[ScanLimits]) -> ScanResult:
-    ctx = _ScanContext(strict=strict, limits=limits)
+def _scan(
+    data: IO[bytes], file_id: str, file_ext: Optional[str], strict: bool, limits: Optional[ScanLimits], every_file: bool = False
+) -> ScanResult:
+    ctx = _ScanContext(strict=strict, limits=limits, every_file=every_file)
     _walk(data, file_id, file_ext, ctx, depth=0, layers=0)
     return ctx.result
 
@@ -2488,7 +2592,7 @@ def scan_huggingface_model(repo_id, strict=False, limits: Optional[ScanLimits] =
     for file_name in file_names:
         url = f"https://huggingface.co/{repo_id}/resolve/main/{urllib.parse.quote(file_name)}"
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
-        scan_result.merge(_isolated(lambda: _scan_remote_file(url, os.path.splitext(file_name)[1], strict, limits), url))
+        scan_result.merge(_isolated(lambda: _scan_remote_file(url, os.path.splitext(file_name)[1], strict, limits, True), url))
 
     return scan_result
 
@@ -2497,7 +2601,7 @@ def _isolated(scan, file_id: str) -> ScanResult:
     """Runs one file's scan so that a failure is recorded for that file instead of aborting a multi-file scan."""
     try:
         return scan()
-    except OSError as e:
+    except (OSError, _HTTPError) as e:
         return _error_result(file_id, ScanErrorKind.IO, str(e))
     except Exception as e:
         _log.exception(f"Unexpected error scanning {file_id}")
@@ -2552,7 +2656,7 @@ def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None, strict=F
             def scan_one(file_path=file_path, file_ext=file_ext) -> ScanResult:
                 with open(file_path, "rb") as file:
                     _log.debug("Scanning file %s", file_path)
-                    return scan_bytes(file, file_path, file_ext, strict=strict, limits=limits)
+                    return _scan(file, file_path, file_ext, strict, limits, every_file=True)
 
             scan_result.merge(_isolated(scan_one, file_path))
 
