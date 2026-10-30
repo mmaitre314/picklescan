@@ -26,6 +26,7 @@ from picklescan.scanner import (
     SafetyLevel,
     ScanFilter,
     FileFormat,
+    Location,
     ScanErrorKind,
     ScanLimits,
     ScanResult,
@@ -1459,6 +1460,7 @@ def test_model_zip_members():
     payload = pickle.dumps(Malicious1())
     members = [
         ("archive/data.pkl", pickle.dumps(OrderedDict())),
+        ("archive/version", b"3\n"),
         ("archive/data/0", payload),  # raw tensor data: torch.load never unpickles it
         ("archive/code/model.py", b"class Model:\n    pass\n"),  # text: neither
         ("archive/extra/payload.pkl.gz", gzip.compress(payload)),  # a zip with a data.pkl is not only read by torch.load
@@ -1729,6 +1731,42 @@ def test_joblib_array_data_is_also_read_as_opcodes():
     data = b"\x80\x04" + _wrapper_class + b")\x81" + _wrapper_state + b"cos\nsystem\n0" + b"\x00" * 4 + b"0."
     result = scan_pickle_bytes(io.BytesIO(data), "both.joblib")
     assert Global("os", "system", SafetyLevel.Dangerous) in result.globals and not result.scan_err, result
+
+
+def test_findings_and_errors_have_locations(tmp_path):
+    inner = _zip_bytes([("deep.pkl", pickle.dumps(Malicious1()))])
+    outer = _zip_bytes([("model/payload.pkl", pickle.dumps(Malicious1()) + b"\xff"), ("inner.zip", inner)])
+    result = scan_bytes(io.BytesIO(outer), "model.zip", limits=ScanLimits(max_archive_depth=2))
+    locations = sorted(g.location.describe() for g in result.globals)
+    assert locations == ["model.zip (inner.zip > deep.pkl)", "model.zip (model/payload.pkl)"]
+    (error,) = result.errors
+    assert error.location == Location("model.zip", ("model/payload.pkl",)) and error.file_id == "model.zip:model/payload.pkl"
+    assert error.offset == len(pickle.dumps(Malicious1()))
+    assert error.format().splitlines() == [
+        f"error[parse]: unknown opcode b'\\xff' at position {error.offset}",
+        f" --> model.zip (model/payload.pkl), offset {error.offset}",
+        "  = note: imports found up to this point are reported; what follows was not scanned",
+    ]
+    skipped = scan_bytes(io.BytesIO(outer), "model.zip").skipped
+    assert [s.format() for s in skipped] == [
+        "skipped: zip archive nested in another archive: not opened (ScanLimits.max_archive_depth)\n --> model.zip (inner.zip)"
+    ]
+
+
+def test_pytorch_zip_detection_requires_its_layout():
+    # a data.pkl member alone does not make a zip a PyTorch file (whose other members would not be scanned)
+    generic = _zip_bytes([("archive/data.pkl", pickle.dumps(1)), ("archive/notes.pkl.gz", gzip.compress(pickle.dumps(Malicious1())))])
+    assert detect_file(io.BytesIO(generic), "x.zip").format == FileFormat.ZIP
+    assert _finds_eval(scan_bytes(io.BytesIO(generic), "x.zip"))
+    with open(f"{_root_path}/data/new_pytorch_model.bin", "rb") as f:
+        assert detect_file(f, "x.bin").format == FileFormat.PYTORCH_ZIP
+
+
+def test_main_module_exit_code():
+    import subprocess
+
+    command = [sys.executable, "-m", "picklescan", "-p", f"{_root_path}/data/malicious1_v4.pkl"]
+    assert subprocess.run(command, capture_output=True).returncode == 1
 
 
 def test_scan_directory_path():
