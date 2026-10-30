@@ -183,6 +183,9 @@ def main():
 
     if "log_level" in args and args.log_level is not None:
         _log.setLevel(getattr(logging, args.log_level))
+    if _log.getEffectiveLevel() == logging.INFO:
+        # Errors and skipped content are printed once, from the scan result, in the summary (printed at the INFO level)
+        handler.addFilter(lambda record: not getattr(record, "picklescan_reported", False))
 
     scan_filter = ScanFilter(
         exclude=[re.compile(p) for p in args.exclude],

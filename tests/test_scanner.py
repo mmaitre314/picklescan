@@ -2011,6 +2011,46 @@ def test_cli_escapes_what_files_contain(tmp_path):
     assert output.startswith("\x1b[31m") and "dangerous import" in output.splitlines()[0], output
 
 
+def test_numeric_arguments_like_cpython():
+    # the C unpickler reads INT, LONG, FLOAT, PUT and GET arguments as C strings, ending at a NUL byte, and accepts whitespace and
+    # base prefixes: what follows is loaded, so it is scanned
+    then_system = b"0cos\nsystem\n."
+    for argument in (b"I11\x00junk\n", b"I0x1f\n", b"I  12  \n", b"L12\x00x\n", b"L12L\n", b"F1.5\x00x\n"):
+        result = scan_pickle_bytes(io.BytesIO(argument + then_system), "numbers.pkl")
+        compare_scan_results(result, ScanResult([Global("os", "system", SafetyLevel.Dangerous)], 1, 1, 1)), argument
+    put_with_nul = b"S'os'\np0\x00junk\n0g0\nS'system'\n\x93."
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(put_with_nul), "put.pkl"), ScanResult([Global("os", "system", SafetyLevel.Dangerous)], 1, 1, 1)
+    )
+    # what no unpickler accepts is still an error
+    for argument in (b"I\n", b"I\x00junk\n", b"Ione\n"):
+        result = scan_pickle_bytes(io.BytesIO(b"cos\nsystem\n0" + argument + b"."), "invalid.pkl")
+        assert _error_kinds(result) == [ScanErrorKind.PARSE] and "invalid argument for INT" in result.errors[0].message, argument
+
+
+def test_cli_errors_with_log_levels(tmp_path):
+    import subprocess
+
+    path = tmp_path / "broken.pkl"
+    path.write_bytes(pickle.dumps(Malicious1()) + b"\xff")
+    # without the summary, errors are printed as they happen
+    output = subprocess.run(
+        [sys.executable, "-m", "picklescan", "-p", str(path), "--color", "never", "-l", "ERROR"], capture_output=True, text=True
+    ).stdout
+    assert output.count("unknown opcode") == 1 and "SCAN SUMMARY" not in output, output
+
+
+def test_cli_prints_each_error_once(tmp_path):
+    import subprocess
+
+    path = tmp_path / "broken.pkl"
+    path.write_bytes(pickle.dumps(Malicious1()) + b"\xff")
+    output = subprocess.run(
+        [sys.executable, "-m", "picklescan", "-p", str(path), "--color", "never"], capture_output=True, text=True
+    ).stdout
+    assert output.count("unknown opcode") == 1 and "error[parse]" in output
+
+
 def test_main():
     argv = sys.argv
     try:
