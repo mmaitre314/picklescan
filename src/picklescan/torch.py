@@ -1,5 +1,4 @@
 import io
-from pickletools import genops
 from typing import IO, Optional
 
 
@@ -73,12 +72,25 @@ def _is_zipfile(f) -> bool:
     return read_bytes == local_header_magic_number
 
 
+_int_opcodes = {"INT", "BININT", "BININT1", "BININT2", "LONG", "LONG1", "LONG4"}
+
+
 def get_magic_number(data: IO[bytes]) -> Optional[int]:
+    """The integer a legacy PyTorch file starts with, if it is a literal (the stream position is left unchanged).
+
+    torch.save writes it as the first opcode of the first pickle, after PROTO. A magic number computed some other way (through
+    __reduce__, say) is not recognized, and such a file is then scanned as a plain sequence of pickles, which covers all of it.
+    """
+    from .scanner import _genops  # the scanner's parser does not load large arguments into memory
+
+    start = data.tell()
     try:
-        for opcode, args, _pos in genops(data):
-            if "INT" in opcode.name or "LONG" in opcode.name:
-                data.seek(0)
-                return int(args)
-    except ValueError:
+        for opcode, arg, _pos in _genops(data):
+            if opcode.name in ("PROTO", "FRAME"):
+                continue
+            return int(arg) if opcode.name in _int_opcodes else None
+    except Exception:
         return None
+    finally:
+        data.seek(start)
     return None
