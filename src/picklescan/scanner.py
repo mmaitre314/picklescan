@@ -488,7 +488,10 @@ def _http_get(url, max_bytes: Optional[int] = None, _redirects: int = 0) -> byte
 
 
 class _SkippedBytes:
-    """Stands in for a bytes argument too large to be a module or global name (tensor data, typically): only its size is kept."""
+    """Stands in for an argument too large to be a module or global name (tensor data, typically): only its size is kept.
+
+    As a value it is unknown: used as a STACK_GLOBAL operand, the import is reported as dangerous.
+    """
 
     __slots__ = ("size",)
 
@@ -499,9 +502,31 @@ class _SkippedBytes:
         return f"<{self.size} bytes skipped>"
 
 
-# Bytes arguments larger than this are skipped instead of being loaded into memory
+# Arguments larger than these are skipped instead of being loaded into memory: bytes are never names, and names are never this long
 _max_kept_bytes_arg_size = 4096
+_max_kept_string_size = 1 << 10
+# Numbers in protocol 0 lines, whitespace aside: longer ones are no valid memo index anyway
+_max_kept_number_size = 64
+# Strings the memo keeps alive, in total for a pickle: beyond, what the memo stores reads as unknown
+_max_memo_string_bytes = 64 << 20
 _skip_chunk_size = 1 << 20
+
+
+def _skip(f: IO[bytes], size: int, name: str):
+    """Moves past an argument without reading it when it is large and seeking is free, reads through it in chunks otherwise."""
+    if size >= _skip_chunk_size and _cheaply_seekable(f):
+        pos = f.tell()
+        remaining = f.seek(0, io.SEEK_END) - pos
+        if remaining < size:
+            raise ValueError(f"expected {size} bytes in a {name}, but only {remaining} remain")
+        f.seek(pos + size)
+        return
+    remaining = size
+    while remaining > 0:
+        chunk = f.read(min(remaining, _skip_chunk_size))
+        if not chunk:
+            raise ValueError(f"expected {size} bytes in a {name}, but only {size - remaining} remain")
+        remaining -= len(chunk)
 
 
 def _bytes_arg_reader(name: str, prefix_reader, prefix_size: int, wrap=bytes):
@@ -512,13 +537,7 @@ def _bytes_arg_reader(name: str, prefix_reader, prefix_size: int, wrap=bytes):
             if len(data) != size:
                 raise ValueError(f"expected {size} bytes in a {name}, but only {len(data)} remain")
             return wrap(data), prefix_size + size
-        # Read through in chunks rather than seeking, so a truncated argument is detected like pickletools does
-        remaining = size
-        while remaining > 0:
-            chunk = f.read(min(remaining, _skip_chunk_size))
-            if not chunk:
-                raise ValueError(f"expected {size} bytes in a {name}, but only {size - remaining} remain")
-            remaining -= len(chunk)
+        _skip(f, size, name)
         return _SkippedBytes(size), prefix_size + size
 
     return reader
@@ -531,10 +550,78 @@ def _counted_arg_reader(name: str, prefix_reader, prefix_size: int, convert, tru
         size = prefix_reader(f)
         if size < 0:
             raise ValueError(f"{name} byte count < 0: {size}")
+        if size > _max_kept_string_size:
+            _skip(f, size, name)
+            return _SkippedBytes(size), prefix_size + size
         data = f.read(size)
         if len(data) != size:
             raise ValueError(truncated_message or f"expected {size} bytes in a {name}, but only {len(data)} remain")
         return convert(data), prefix_size + size
+
+    return reader
+
+
+def _read_line(f: IO[bytes]) -> Tuple[Optional[bytes], int]:
+    """A line, or None when it is longer than _max_kept_string_size (then consumed without being kept), and the bytes read."""
+    line = f.readline(_max_kept_string_size + 1)
+    consumed = len(line)
+    if line.endswith(b"\n") or len(line) <= _max_kept_string_size:
+        return line, consumed
+    while not line.endswith(b"\n"):
+        line = f.readline(_skip_chunk_size)
+        if not line:
+            raise ValueError("no newline found when trying to read a line argument")
+        consumed += len(line)
+    return None, consumed
+
+
+def _read_number_line(f: IO[bytes]) -> Tuple[Optional[bytes], int]:
+    """A line holding a number, without its leading whitespace, or None when what is left is longer than _max_kept_number_size
+    (whitespace aside), and the bytes read. The unpicklers ignore whitespace around numbers, so it can make a line of any length.
+    """
+    kept, consumed, too_long = b"", 0, False
+    while True:
+        chunk = f.readline(_skip_chunk_size)
+        if not chunk:
+            raise ValueError("no newline found when trying to read a line argument")
+        consumed += len(chunk)
+        end = chunk.endswith(b"\n")
+        if not too_long:
+            body = chunk[:-1] if end else chunk
+            kept += body.lstrip() if not kept else body
+            if len(kept) > _max_kept_number_size:
+                core = kept.rstrip()
+                # Trailing whitespace is kept as a single space: anything after it makes the number invalid, as it should
+                kept = core + b" " if len(core) < len(kept) else core
+                too_long = len(core) > _max_kept_number_size
+        if end:
+            return (None if too_long else kept + b"\n"), consumed
+
+
+def _number_line_arg_reader(read_from_line):
+    """The pickletools reader for a number on a line (protocol 0), fed the number without the whitespace around it."""
+
+    def reader(f: IO[bytes]):
+        line, consumed = _read_number_line(f)
+        if line is None:
+            return _SkippedBytes(consumed), consumed
+        return read_from_line(io.BytesIO(line)), consumed
+
+    return reader
+
+
+def _line_arg_reader(read_from_lines, line_count: int = 1):
+    """The pickletools reader for a newline-terminated argument (protocol 0), fed lines read with a bounded size."""
+
+    def reader(f: IO[bytes]):
+        lines, consumed = [], 0
+        for _ in range(line_count):
+            line, size = _read_line(f)
+            lines.append(line)
+            consumed += size
+        if any(line is None for line in lines):
+            return _SkippedBytes(consumed), consumed
+        return read_from_lines(io.BytesIO(b"".join(lines))), consumed
 
     return reader
 
@@ -564,6 +651,13 @@ _counted_arg_readers = {
     pickletools.long4: _counted_arg_reader(
         "long4", pickletools.read_int4, 4, pickletools.decode_long, "not enough data in stream to read long4"
     ),
+    pickletools.stringnl: _line_arg_reader(pickletools.read_stringnl),
+    pickletools.stringnl_noescape: _line_arg_reader(pickletools.read_stringnl_noescape),
+    pickletools.stringnl_noescape_pair: _line_arg_reader(pickletools.read_stringnl_noescape_pair, line_count=2),
+    pickletools.unicodestringnl: _line_arg_reader(pickletools.read_unicodestringnl),
+    pickletools.decimalnl_short: _number_line_arg_reader(pickletools.read_decimalnl_short),
+    pickletools.decimalnl_long: _number_line_arg_reader(pickletools.read_decimalnl_long),
+    pickletools.floatnl: _number_line_arg_reader(pickletools.read_floatnl),
 }
 # Opcode byte -> (opcode, plain reader or None, counted reader or None, fixed argument size or None)
 _opcode_table = {}
@@ -573,10 +667,9 @@ for _op in pickletools.opcodes:
         _opcode_table[_op.code.encode("latin-1")] = (_op, None, None, 0)
     elif _arg in _counted_arg_readers:
         _opcode_table[_op.code.encode("latin-1")] = (_op, None, _counted_arg_readers[_arg], None)
-    elif _arg.n >= 0:
+    else:
+        assert _arg.n >= 0, f"no counted reader for {_arg.name}"
         _opcode_table[_op.code.encode("latin-1")] = (_op, _arg.reader, None, _arg.n)
-    else:  # newline-terminated arguments (protocol 0): their size is only known by asking the stream
-        _opcode_table[_op.code.encode("latin-1")] = (_op, _arg.reader, None, None)
 
 
 def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None):
@@ -611,7 +704,7 @@ def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None):
             end_pos = pos + 1
         else:
             arg = reader(data)
-            end_pos = pos + 1 + size if size is not None else data.tell()
+            end_pos = pos + 1 + size
 
         if frame_end is not None:
             if pos >= frame_end:
@@ -654,6 +747,11 @@ class _KnownImport(tuple):
     __slots__ = ()
 
 
+def _global_arg(arg) -> Tuple[str, str]:
+    """What a GLOBAL or INST imports: a line too long to be kept (_SkippedBytes) imports something unknown."""
+    return tuple(arg.split(" ", 1)) if isinstance(arg, str) else (_unknown, _unknown)
+
+
 def _import_value(imported: Tuple[str, str], trusted: bool = True):
     """Value pushed by an import: other imports than safe classes and functions can be strings (os.sep is one), and so can safe
     ones once the pickle has run code that could replace module attributes (trusted=False, see _Reading)."""
@@ -683,17 +781,30 @@ class _Reading:
     given state (BUILD) to what they returned: anything else can replace module or class attributes (BUILD on a module or a class,
     setattr...), after which a safe import, or calling one, can return a string."""
 
-    __slots__ = ("stack", "memo", "trusted")
+    __slots__ = ("stack", "memo", "trusted", "memo_lost", "memo_string_bytes")
 
     def __init__(self):
         self.stack = []
         self.memo = {}
         self.trusted = True
+        self.memo_lost = False  # a memo write went to a slot not known statically: any slot can hold anything
+        self.memo_string_bytes = 0
 
     def copy(self) -> "_Reading":
         reading = _Reading()
         reading.stack, reading.memo, reading.trusted = list(self.stack), dict(self.memo), self.trusted
+        reading.memo_lost, reading.memo_string_bytes = self.memo_lost, self.memo_string_bytes
         return reading
+
+    def memo_put(self, key):
+        value = self.stack[-1] if self.stack and self.stack[-1] is not _mark else _unknown
+        if key is None:
+            self.memo_lost = True
+        elif isinstance(value, str) and value is not _unknown:
+            self.memo_string_bytes += len(value)
+            self.memo[key] = value if self.memo_string_bytes <= _max_memo_string_bytes else _unknown
+        else:
+            self.memo[key] = value
 
     def distrust(self):
         self.trusted = False
@@ -734,13 +845,13 @@ class _Reading:
             stack.extend(pushes)
             return None
         if name == "MEMOIZE":
-            self.memo[len(self.memo)] = stack[-1] if stack and stack[-1] is not _mark else _unknown
+            self.memo_put(len(self.memo))
             return None
         if name in _memo_get_ops:
             key = _memo_key(arg, pos)
             if key not in self.memo:
                 _log.debug(f"Memo key {key} not found at position {pos}, treating as unknown (potential evasion attempt)")
-            stack.append(self.memo.get(key, _unknown))
+            stack.append(_unknown if self.memo_lost else self.memo.get(key, _unknown))
             return None
         if name in _string_ops:
             stack.append(arg if isinstance(arg, str) else _unknown)
@@ -749,7 +860,7 @@ class _Reading:
             stack.append(_mark)
             return None
         if name in _memo_put_ops:
-            self.memo[_memo_key(arg, pos)] = stack[-1] if stack and stack[-1] is not _mark else _unknown
+            self.memo_put(_memo_key(arg, pos))
             return None
         if name == "DUP":
             stack.append(stack[-1] if stack and stack[-1] is not _mark else self.pop())
@@ -773,7 +884,7 @@ class _Reading:
             stack.append(_import_value(imported, self.trusted))
             return imported
         if name == "GLOBAL":
-            stack.append(_import_value(tuple(arg.split(" ", 1)), self.trusted))
+            stack.append(_import_value(_global_arg(arg), self.trusted))
             return None
         if name in ("EXT1", "EXT2", "EXT4"):
             if self.trusted:
@@ -786,7 +897,7 @@ class _Reading:
             callable_value = items[0] if items else _unknown
         elif name == "INST":
             self.pop_mark()
-            callable_value = _import_value(tuple(arg.split(" ", 1)), self.trusted)
+            callable_value = _import_value(_global_arg(arg), self.trusted)
         else:
             for _ in range(1 if name != "NEWOBJ_EX" else 2):
                 self.pop()
@@ -858,7 +969,7 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
             for op, op_value, pos in _genops(data, frame_violations):
                 op_name = op.name
                 if op_name in ("GLOBAL", "INST"):
-                    globals.add(tuple(op_value.split(" ", 1)))
+                    globals.add(_global_arg(op_value))
                 elif op_name == "PROTO" and not first_op:
                     enclosing.append(nested if nested is not None else reading.copy())
                     nested = _Reading()

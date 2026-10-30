@@ -1528,6 +1528,93 @@ def test_detect_file():
     assert "nested" in tar.members[1].note and tar.members[1].members == []
 
 
+def test_parser_resource_bounds():
+    """Arguments the parser does not need are neither kept in memory nor, where seeking is free, even read."""
+    import tracemalloc
+
+    # a protocol 0 line with no end, megabytes long
+    endless_line = io.BytesIO(b"S'" + b"a" * (50 << 20))
+    tracemalloc.start()
+    try:
+        result = scan_pickle_bytes(endless_line, "endless_line.pkl")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    compare_scan_results(result, ScanResult([], 1, 0, 0))
+    assert peak < 8 << 20, f"peak memory {peak / 2**20:.1f} MiB"
+
+    # names too long to be kept are unknown, which makes the import dangerous
+    long_module = b"\x80\x04X" + (100_000).to_bytes(4, "little") + b"o" * 100_000 + b"\x8c\x06system\x93."
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(long_module), "long_module.pkl"),
+        ScanResult([Global("unknown", "system", SafetyLevel.Dangerous)], 1, 1, 1),
+    )
+    long_global = b"c" + b"o" * 100_000 + b"\nsystem\n."
+    compare_scan_results(
+        scan_pickle_bytes(io.BytesIO(long_global), "long_global.pkl"),
+        ScanResult([Global("unknown", "unknown", SafetyLevel.Dangerous)], 1, 1, 1),
+    )
+
+    # large arguments are skipped by seeking
+    class CountingBytesIO(io.BytesIO):
+        bytes_read = 0
+
+        def read(self, size=-1):
+            data = super().read(size)
+            CountingBytesIO.bytes_read += len(data)
+            return data
+
+    data = CountingBytesIO(pickle.dumps([b"\x00" * (50 << 20), Malicious1()], protocol=4))
+    assert _finds_eval(scan_pickle_bytes(data, "weights.pkl"))
+    assert CountingBytesIO.bytes_read < 1 << 20
+
+
+def test_parser_bounds_edges(monkeypatch):
+    cap = scanner_module._max_kept_string_size
+    os_system = Global("os", "system", SafetyLevel.Dangerous)
+    unknown_system = Global("unknown", "system", SafetyLevel.Dangerous)
+
+    # strings up to the cap are kept, longer ones are unknown
+    def stack_global(module: bytes) -> bytes:
+        return b"\x80\x04X" + len(module).to_bytes(4, "little") + module + b"\x8c\x06system\x93."
+
+    assert scan_pickle_bytes(io.BytesIO(stack_global(b"os".ljust(cap, b"x"))), "a.pkl").globals[0].module == "os".ljust(cap, "x")
+    assert scan_pickle_bytes(io.BytesIO(stack_global(b"os".ljust(cap + 1, b"x"))), "a.pkl").globals == [unknown_system]
+    # same for lines
+    line = b"c" + b"os".ljust(cap, b"x") + b"\nsystem\n."
+    assert scan_pickle_bytes(io.BytesIO(line), "a.pkl").globals[0].module == "os".ljust(cap, "x")
+    line = b"c" + b"os".ljust(cap + 1, b"x") + b"\nsystem\n."
+    assert scan_pickle_bytes(io.BytesIO(line), "a.pkl").globals == [Global("unknown", "unknown", SafetyLevel.Dangerous)]
+
+    # the unpicklers ignore whitespace around numbers, which can make a line of any length: a padded PUT index still overwrites
+    # its slot (here 0, holding a harmless string, with 'os')
+    padding = b" " * (1 << 20)
+    data = b"(S'builtins'\np0\n0S'os'\np" + padding + b"0" + padding + b"\n0g0\nS'system'\n\x93."
+    compare_scan_results(scan_pickle_bytes(io.BytesIO(data), "padded.pkl"), ScanResult([os_system], 1, 1, 1))
+    # a PUT to a slot that cannot be told makes every slot unknown
+    data = b"(S'builtins'\np0\n0S'os'\np" + b"1" * 100 + b"\n0g0\nS'system'\n\x93."
+    compare_scan_results(scan_pickle_bytes(io.BytesIO(data), "lost.pkl"), ScanResult([unknown_system], 1, 1, 1))
+
+    # past the memo budget, what the memo stores is unknown
+    monkeypatch.setattr(scanner_module, "_max_memo_string_bytes", 10)
+    data = b"\x80\x04\x8c\x0aabcdefghij\x940\x8c\x02os\x940h\x01\x8c\x06system\x93."
+    compare_scan_results(scan_pickle_bytes(io.BytesIO(data), "budget.pkl"), ScanResult([unknown_system], 1, 1, 1))
+    monkeypatch.setattr(scanner_module, "_max_memo_string_bytes", 12)
+    compare_scan_results(scan_pickle_bytes(io.BytesIO(data), "budget.pkl"), ScanResult([os_system], 1, 1, 1))
+
+    # small arguments are read through rather than skipped by seeking
+    class SeekCountingBytesIO(io.BytesIO):
+        seeks = 0
+
+        def seek(self, *args):
+            SeekCountingBytesIO.seeks += 1
+            return super().seek(*args)
+
+    data = SeekCountingBytesIO(pickle.dumps([b"\x00" * 10_000] * 100, protocol=4))
+    scan_pickle_bytes(data, "small.pkl")
+    assert SeekCountingBytesIO.seeks < 5
+
+
 def test_scan_directory_path():
     sr = ScanResult(
         globals=[
