@@ -1615,6 +1615,122 @@ def test_parser_bounds_edges(monkeypatch):
     assert SeekCountingBytesIO.seeks < 5
 
 
+def test_joblib_array_data_is_skipped():
+    """joblib reads numeric array data as raw bytes right after each NumpyArrayWrapper's BUILD: skipped like joblib does, so that
+    parsing goes on after it (array data is not opcodes)."""
+    wrapper = Global("joblib.numpy_pickle", "NumpyArrayWrapper", SafetyLevel.Suspicious)
+    numpy_globals = [Global("numpy", "dtype", SafetyLevel.Innocuous), Global("numpy", "ndarray", SafetyLevel.Innocuous)]
+    for name in ("p2", "p3", "p4", "p5", "compressed"):
+        result = scan_file_path(f"{_root_path}/data2/joblib_arrays_{name}.joblib")
+        assert not result.scan_err, (name, result.errors)
+        codecs = [Global("_codecs", "encode", SafetyLevel.Suspicious)] if name == "p2" else []  # protocol 2 bytes
+        compare_scan_results(result, ScanResult([wrapper] + numpy_globals + codecs, 1, 0, 0, suspicious_count=1 + len(codecs)))
+    result = scan_file_path(f"{_root_path}/data2/joblib_arrays_then_malicious.joblib")
+    assert _finds_eval(result) and not result.scan_err, result
+
+
+def test_joblib_array_of_unknown_size_is_an_error():
+    # A NumpyArrayWrapper whose state cannot be told: joblib would read array data of a size we don't know, so we stop rather
+    # than parse that data as opcodes
+    wrapper = b"\x8c\x13joblib.numpy_pickle\x8c\x11NumpyArrayWrapper\x93)\x81"
+    state = b"}(\x8c\x05shape\x8c\x07unknown\x8c\x05dtype\x8c\x03?!?u"  # shape is a string
+    data = b"\x80\x04" + wrapper + state + b"b" + b"\x00" * 64 + pickle.dumps(Malicious1())
+    result = scan_pickle_bytes(io.BytesIO(data), "unknown_size.joblib")
+    assert _error_kinds(result) == [ScanErrorKind.PARSE] and "joblib" in result.errors[0].message
+
+
+def _u(text: str) -> bytes:
+    return b"\x8c" + bytes([len(text)]) + text.encode()
+
+
+_float32_dtype = (
+    _u("numpy")
+    + _u("dtype")
+    + b"\x93"
+    + _u("f4")
+    + b"\x89\x88\x87R"  # numpy.dtype("f4", False, True)
+    + b"(K\x03"
+    + _u("<")
+    + b"NNNJ\xff\xff\xff\xffJ\xff\xff\xff\xffK\x00tb"  # its state, set by BUILD
+)
+_wrapper_class = _u("joblib.numpy_pickle") + _u("NumpyArrayWrapper") + b"\x93"
+_wrapper_state = b"}(" + _u("shape") + b"K\x04\x85" + _u("dtype") + _float32_dtype + b"ub"  # BUILD: joblib reads 4 float32 here
+_eval_call = _u("builtins") + _u("eval") + b"\x93" + _u("1") + b"\x85R"
+
+
+def test_joblib_tracking_follows_object_creation():
+    # created through copyreg.__newobj__ rather than NEWOBJ: the 16 bytes of array data are still skipped (they would not parse)
+    via_newobj = _u("copyreg") + _u("__newobj__") + b"\x93" + _wrapper_class + b"\x85R"
+    data = b"\x80\x04" + via_newobj + _wrapper_state + b"\xff" * 16 + b"0" + _eval_call + b"."
+    result = scan_pickle_bytes(io.BytesIO(data), "newobj.joblib")
+    assert _finds_eval(result) and not result.scan_err, result
+
+    # a subclass of the wrapper created while unpickling would make joblib read array data too: it cannot be told apart, so it is
+    # an error rather than a guess
+    subclass = _u("builtins") + _u("type") + b"\x93" + _u("X") + _wrapper_class + b"\x85}\x87R"  # type("X", (wrapper,), {})
+    data = b"\x80\x04" + subclass + b")\x81" + _wrapper_state + b"\xff" * 16 + b"0" + _eval_call + b"."
+    result = scan_pickle_bytes(io.BytesIO(data), "subclass.joblib")
+    assert _error_kinds(result) == [ScanErrorKind.PARSE] and "used otherwise" in result.errors[0].message
+
+
+def test_joblib_tracking_resists_crafted_structures():
+    # keys made of deeply nested tuples are never hashed (CPython's tuple hash recurses without limit)
+    nested = b"N" + b"\x85" * 200_000
+    data = b"\x80\x04" + _wrapper_class + b"0}" + nested + b"Ns" + b"0" + _eval_call + b"."
+    result = scan_pickle_bytes(io.BytesIO(data), "nested.joblib")
+    assert _finds_eval(result), result
+    # a dtype whose field refers to itself, through the memo: fields are not looked into (numpy takes the size from the state)
+    cyclic_dtype = _u("numpy") + _u("dtype") + b"\x93" + _u("V4") + b"\x89\x88\x87R\x94"  # memo 1 (memo 0: the wrapper class)
+    cyclic_state = b"(K\x03" + _u("|") + b"NN}" + _u("a") + b"h\x01K\x00\x86sK\x04K\x01K\x00tb"  # fields: {"a": (itself, 0)}
+    state = b"}(" + _u("shape") + b"K\x01\x85" + _u("dtype") + cyclic_dtype + cyclic_state + b"ub"
+    data = b"\x80\x04" + _wrapper_class + b"\x94)\x81" + state + b"\x00" * 4 + b"0" + _eval_call + b"."
+    result = scan_pickle_bytes(io.BytesIO(data), "cyclic.joblib")
+    assert _finds_eval(result) and not result.scan_err, result
+
+
+def _joblib_error(data: bytes) -> str:
+    result = scan_pickle_bytes(io.BytesIO(b"\x80\x04" + data + b"0" + _eval_call + b"."), "crafted.joblib")
+    assert _error_kinds(result) == [ScanErrorKind.PARSE], result
+    return result.errors[0].message
+
+
+def test_joblib_wrappers_are_only_recognized_as_joblib_writes_them():
+    data_16 = b"\xff" * 16
+    # created otherwise than through NEWOBJ or copyreg: calling the class, or giving it to another function
+    assert "used otherwise" in _joblib_error(_wrapper_class + b"(NNNNtR" + _wrapper_state + data_16)
+    object_new = _u("builtins") + _u("object.__new__") + b"\x93"
+    assert "used otherwise" in _joblib_error(object_new + _wrapper_class + b"\x85R" + _wrapper_state + data_16)
+    # an attribute of the class
+    wrapper_new = _u("joblib.numpy_pickle") + _u("NumpyArrayWrapper.__new__") + b"\x93"
+    assert "used otherwise" in _joblib_error(wrapper_new + _wrapper_class + b"\x85R" + _wrapper_state + data_16)
+    # the class or an instance kept in a container
+    assert "used otherwise" in _joblib_error(b"]" + _wrapper_class + b"a")
+    assert "used otherwise" in _joblib_error(b"]" + _wrapper_class + b")\x81a")
+    # given state twice (the second time, through the memo)
+    twice = _wrapper_class + b")\x81\x94" + _wrapper_state + data_16 + b"0h\x00" + _wrapper_state
+    assert "twice" in _joblib_error(twice + data_16)
+    # state joblib does not write: unknown keys, slot state, a shape too large for joblib's 64-bit sizes
+    unknown_key = b"}(" + _u("shape") + b"K\x04\x85" + _u("dtype") + _float32_dtype + _u("other") + b"Nub"
+    assert "known keys" in _joblib_error(_wrapper_class + b")\x81" + unknown_key + data_16)
+    slot_state = b"N" + _wrapper_state[:-1] + b"\x86b"
+    assert "known keys" in _joblib_error(_wrapper_class + b")\x81" + slot_state + data_16)
+    huge = b"}(" + _u("shape") + b"\x8a\x05\x00\x00\x00\x00\x01\x8a\x05\x00\x00\x00\x00\x01\x86" + _u("dtype") + _float32_dtype + b"ub"
+    assert "overflows" in _joblib_error(_wrapper_class + b")\x81" + huge)
+    # state given to joblib's module or class: what joblib reads then depends on it
+    module_state = _u("joblib") + _u("numpy_pickle") + b"\x93N}" + _u("NumpyArrayWrapper") + b"N" + b"s\x86b0"
+    assert "class or a module" in _joblib_error(_wrapper_class + b"0" + module_state)
+    # a class known only from a call: it could be the wrapper class
+    getattr_class = _u("builtins") + _u("getattr") + b"\x93" + _u("x") + _u("y") + b"\x86R"
+    assert "not known statically" in _joblib_error(_wrapper_class + b"0" + getattr_class + b")\x81" + _wrapper_state + data_16)
+
+
+def test_joblib_array_data_is_also_read_as_opcodes():
+    # pickle.load reads the array data joblib skips as opcodes: what it imports there is reported when dangerous
+    data = b"\x80\x04" + _wrapper_class + b")\x81" + _wrapper_state + b"cos\nsystem\n0" + b"\x00" * 4 + b"0."
+    result = scan_pickle_bytes(io.BytesIO(data), "both.joblib")
+    assert Global("os", "system", SafetyLevel.Dangerous) in result.globals and not result.scan_err, result
+
+
 def test_scan_directory_path():
     sr = ScanResult(
         globals=[

@@ -1056,6 +1056,37 @@ def initialize_numpy_files():
     if not os.path.exists(path):
         np.savez_compressed(path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int))
 
+    # joblib reads numeric array data as raw bytes in the middle of the pickle, right after each array's NumpyArrayWrapper
+    arrays = {
+        "float32": np.arange(100, dtype=np.float32),
+        "int64": np.arange(12, dtype=np.int64).reshape(3, 4),
+        "bool": np.array([True, False]),
+        "complex": np.array([1 + 2j]),
+        "unicode": np.array(["abc", "de"]),
+        "datetime": np.array(["2024-01-01"], dtype="datetime64[ns]"),
+        "structured": np.zeros(3, dtype=[("a", "f4"), ("b", "i2")]),
+        "subarray": np.zeros(2, dtype=("f4", (2, 3))),
+        "empty": np.zeros((0, 5)),
+        "scalar": np.array(3.5),
+        "fortran": np.asfortranarray(np.arange(6).reshape(2, 3)),
+    }
+    for protocol in (2, 3, 4, 5):
+        path = f"{_root_path}/data2/joblib_arrays_p{protocol}.joblib"
+        if not os.path.exists(path):
+            import joblib
+
+            joblib.dump(arrays, path, protocol=protocol)
+    path = f"{_root_path}/data2/joblib_arrays_compressed.joblib"
+    if not os.path.exists(path):
+        import joblib
+
+        joblib.dump(arrays, path, compress=3)
+    path = f"{_root_path}/data2/joblib_arrays_then_malicious.joblib"
+    if not os.path.exists(path):
+        import joblib
+
+        joblib.dump({"weights": np.ones(1000), "payload": Malicious1(), "more": np.zeros(10)}, path)
+
     # joblib.load decompresses files it recognizes by their magic bytes before unpickling them
     for compress in ("zlib", "gzip", "bz2", "lzma", "xz"):
         path = f"{_root_path}/data2/joblib_malicious_{compress}.joblib"

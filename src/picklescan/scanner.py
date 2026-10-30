@@ -672,7 +672,7 @@ for _op in pickletools.opcodes:
         _opcode_table[_op.code.encode("latin-1")] = (_op, _arg.reader, None, _arg.n)
 
 
-def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None):
+def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None, joblib_reads: Optional[list] = None):
     """pickletools.genops, with two differences.
 
     Large bytes arguments are skipped instead of read into memory: model weights pickled in-band (numpy arrays, raw tensor bytes...)
@@ -684,6 +684,9 @@ def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None):
     than pickletools does. Leftover frame bytes after STOP are likewise skipped by the next pickle.load on the same file. Pickles
     written by pickle.dumps never do any of this, and the pure Python unpickler rejects them, so such violations are reported
     in frame_violations rather than emulated.
+
+    After an opcode is yielded, the consumer can append what joblib reads from the file right after it to joblib_reads (see
+    _JoblibTracker.step): raw array data is skipped, after a padding byte and the padding it announces when aligned.
     """
     frame_end = None
     pos = data.tell()
@@ -723,6 +726,20 @@ def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None):
         if code == b".":
             break
         pos = end_pos
+        if joblib_reads:
+            aligned, size = joblib_reads.pop()
+            if frame_end is not None and pos < frame_end and frame_violations is not None:
+                # joblib reads from the file, after the frame its unpickler has already read: not from here
+                frame_violations.append(f"joblib reads data at position {pos}, before the end of the frame at position {frame_end}")
+            if aligned:
+                padding = read(1)
+                if not padding:
+                    raise ValueError("pickle exhausted before joblib array padding")
+                _skip(data, padding[0], "joblib array padding")
+                pos += 1 + padding[0]
+            if size is not None:
+                _skip(data, size, "joblib array data")
+                pos += size
 
 
 _memo_put_ops = {"MEMOIZE", "PUT", "BINPUT", "LONG_BINPUT"}
@@ -931,6 +948,314 @@ def _opcode_effect(op) -> Tuple[bool, int, tuple]:
 _opcode_effects = {op.name: _opcode_effect(op) for op in pickletools.opcodes if op.name not in _reading_ops}
 
 
+# --------------------------------------------------------------------------------------------------------------------------------
+# joblib arrays. joblib.load pickles a NumpyArrayWrapper in place of each array, and reads the array data from the file right after
+# that wrapper's BUILD: as raw bytes, or as a pickle of its own (read with a fresh Unpickler) when the array holds Python objects.
+# To read the file like joblib does, the values that decide what is read are tracked once a class involved shows up. Anything that
+# would make joblib read data in a way that cannot be told for sure is an error, rather than a guess: parsing on would mean parsing
+# raw data as opcodes, or skipping opcodes as raw data.
+
+_joblib_wrapper_paths = {"joblib.numpy_pickle.NumpyArrayWrapper", "sklearn.externals.joblib.numpy_pickle.NumpyArrayWrapper"}
+# Functions creating an instance of the class given as their first argument (copy_reg: Python 2 names, mapped by fix_imports)
+_instance_constructor_paths = {
+    f"{module}.{name}" for module in ("copyreg", "copy_reg") for name in ("_reconstructor", "__newobj__", "__newobj_ex__")
+}
+_joblib_wrapper_state_keys = {"subclass", "shape", "order", "dtype", "allow_mmap", "numpy_array_alignment_bytes"}
+# Containers are only tracked up to this many items: the values joblib reads its arrays with are small
+_max_tracked_container_items = 64
+_before = object()  # value pushed before tracking started
+_opaque = object()  # value that cannot be told
+
+
+class _JoblibError(ValueError):
+    pass
+
+
+class _Global:
+    """An imported class or function, by its full dotted path (protocol 4 names can be dotted: joblib's unpickler resolves them)."""
+
+    __slots__ = ("path",)
+
+    def __init__(self, module: str, name: str):
+        self.path = f"{module}.{name}"
+
+    def is_wrapper(self) -> bool:
+        return self.path in _joblib_wrapper_paths or any(self.path.startswith(f"{path}.") for path in _joblib_wrapper_paths)
+
+
+class _Object:
+    """The result of calling callable with args (REDUCE, OBJ, INST), or of creating an instance of a class (NEWOBJ); state is what
+    BUILD gives it. Nothing is ever called."""
+
+    __slots__ = ("callable", "args", "new", "state", "built")
+
+    def __init__(self, callable, args, new: bool):
+        self.callable, self.args, self.new, self.state, self.built = callable, args, new, None, False
+
+    def instance_class(self):
+        """The class this is an instance of, when it can be told: _before when it may not be, _opaque when it cannot."""
+        if self.new:
+            return self.callable
+        if isinstance(self.callable, _Global):
+            if self.callable.path in _instance_constructor_paths and isinstance(self.args, tuple) and self.args:
+                return self.args[0]
+            return _before  # what a function returns: not a joblib wrapper, which only the above create
+        return self.callable if self.callable is _before else _opaque
+
+    def is_wrapper(self) -> bool:
+        cls = self.instance_class()
+        return isinstance(cls, _Global) and cls.is_wrapper()
+
+
+class _WrapperArgs(tuple):
+    """Arguments holding a joblib wrapper class: only allowed for the constructors creating an instance of it."""
+
+    __slots__ = ()
+
+
+class _Container:
+    """A list, dict or set as far as it is tracked: its first items (dicts: string keys only), or opaque beyond."""
+
+    __slots__ = ("kind", "items", "opaque")
+
+    def __init__(self, kind: str):
+        self.kind, self.items, self.opaque = kind, ([] if kind != "dict" else {}), False
+
+    def add(self, values: list):
+        if self.opaque:
+            return
+        if self.kind == "dict":
+            for key, value in zip(values[::2], values[1::2]):
+                if type(key) is not str:  # never hashed: a crafted key could make hashing recurse
+                    self.opaque = True
+                    return
+                self.items[key] = value
+        else:
+            self.items.extend(values)
+        if len(self.items) > _max_tracked_container_items:
+            self.opaque, self.items = True, None
+
+
+class _JoblibTracker:
+    """A deliberately dumb model of joblib's unpickler: one step per opcode, in order, with no jumps, no loops and no calls."""
+
+    def __init__(self, memo_lost: bool):
+        self.stack = []
+        self.memo = {}
+        self.memo_lost = memo_lost
+
+    def push(self, value):
+        self.stack.append(value)
+
+    def peek(self):
+        return self.stack[-1] if self.stack and self.stack[-1] is not _mark else _before if not self.stack else _opaque
+
+    def pop_raw(self):
+        if not self.stack:
+            return _before
+        return _opaque if self.stack[-1] is _mark else self.stack.pop()
+
+    def pop(self):
+        """A value the unpickler hands to something: joblib wrappers and their classes cannot be."""
+        value = self.pop_raw()
+        _check_use(value)
+        return value
+
+    def pop_mark(self, check: bool = True) -> list:
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i] is _mark:
+                items = self.stack[i + 1 :]
+                del self.stack[i:]
+                break
+        else:
+            items, self.stack[:] = self.stack[:], []  # the MARK was pushed before tracking started
+        if check:
+            for item in items:
+                _check_use(item)
+        return items
+
+    def step(self, op, arg, imported, memoize_key) -> Optional[Tuple[bool, Optional[int]]]:
+        """Applies an opcode (imported: what it imports, memoize_key: the slot MEMOIZE writes). Returns what joblib reads from the
+        file right after it, if anything: (aligned, size of raw data), or (False, None) for a pickle of its own."""
+        name, push, pop = op.name, self.push, self.pop
+        if name in ("PROTO", "FRAME", "STOP"):
+            return None
+        if name in _memo_put_ops:
+            key = memoize_key if name == "MEMOIZE" else _memo_key(arg, None)
+            if key is None:
+                self.memo_lost = True
+            else:
+                self.memo[key] = self.peek()
+        elif name in _memo_get_ops:
+            push(_opaque if self.memo_lost else self.memo.get(_memo_key(arg, None), _before))
+        elif name == "MARK":
+            push(_mark)
+        elif name in ("NONE", "NEWTRUE", "NEWFALSE"):
+            push(None if name == "NONE" else name == "NEWTRUE")
+        elif name in ("GLOBAL", "INST", "STACK_GLOBAL"):
+            if name == "STACK_GLOBAL":
+                pop(), pop()
+            cls = _Global(*imported) if imported is not None and _unknown not in imported else _opaque
+            if name == "INST":
+                push(self.call(cls, tuple(self.pop_mark()), new=False))
+            else:
+                push(cls)
+        elif name in ("REDUCE", "NEWOBJ", "NEWOBJ_EX"):
+            if name == "NEWOBJ_EX":
+                pop()
+            args, callable = self.pop_raw(), self.pop_raw()
+            push(self.call(callable, args, new=name != "REDUCE"))
+        elif name == "OBJ":
+            items = self.pop_mark()
+            push(self.call(items[0], tuple(items[1:]), new=False) if items else _opaque)
+        elif name == "BUILD":
+            state = pop()
+            target = self.peek()
+            if isinstance(target, _Object):
+                cls = target.instance_class()
+                if not (isinstance(cls, _Global) or cls is _before):
+                    raise _JoblibError("cannot tell whether joblib reads array data after an object of a class not known statically")
+                if target.is_wrapper():
+                    if target.built:
+                        raise _JoblibError("joblib NumpyArrayWrapper given state twice")
+                    target.built = True
+                    self.stack[-1] = _opaque  # joblib replaces the wrapper with the array it reads
+                    return _joblib_array_read(state)
+                target.state = state
+            elif target is _opaque:
+                raise _JoblibError("cannot tell whether joblib reads array data after an object not known statically")
+            elif isinstance(target, _Global):
+                # Attributes of a class or module (joblib's own, which decide what it reads) replaced
+                raise _JoblibError("cannot tell what joblib reads once state is given to a class or a module")
+        elif name in ("TUPLE", "TUPLE1", "TUPLE2", "TUPLE3", "EMPTY_TUPLE"):
+            if name == "TUPLE":
+                items = self.pop_mark(check=False)
+            else:
+                items = [self.pop_raw() for _ in range("_123".index(name[-1]) if name != "EMPTY_TUPLE" else 0)][::-1]
+            if any(_holds_wrapper(item) for item in items):
+                push(_WrapperArgs(items))
+            else:
+                for item in items:
+                    _check_use(item)
+                push(tuple(items) if len(items) <= _max_tracked_container_items else _opaque)
+        elif name in ("EMPTY_LIST", "EMPTY_DICT", "EMPTY_SET", "LIST", "DICT", "FROZENSET"):
+            kind = {"EMPTY_LIST": "list", "LIST": "list", "EMPTY_DICT": "dict", "DICT": "dict"}.get(name, "set")
+            container = _Container(kind)
+            if name in ("LIST", "DICT", "FROZENSET"):
+                container.add(self.pop_mark())
+            push(container)
+        elif name in ("APPEND", "APPENDS", "SETITEM", "SETITEMS", "ADDITEMS"):
+            if name in ("APPEND", "SETITEM"):
+                items = [pop() for _ in range(1 if name == "APPEND" else 2)][::-1]
+            else:
+                items = self.pop_mark()
+            target = self.peek()
+            if isinstance(target, _Container):
+                target.add(items)
+        elif name == "DUP":
+            push(self.peek())
+        elif name == "POP":
+            self.pop_raw()  # discarded: nothing is done with it
+        elif name == "POP_MARK":
+            self.pop_mark(check=False)  # discarded
+        elif op.arg is not None and not op.stack_before and len(op.stack_after) == 1 and name not in ("PERSID", "EXT1", "EXT2", "EXT4"):
+            push(arg if isinstance(arg, (str, int, float)) else _opaque)  # constants (bytes are of no use)
+        else:
+            # Anything else (persistent ids, extensions, buffers...): stack effect only, values that cannot be told
+            before = op.stack_before
+            if pickletools.markobject in before:
+                self.pop_mark()
+                before = before[: before.index(pickletools.markobject)]
+            for _ in before:
+                pop()
+            self.stack.extend(_opaque for _ in op.stack_after)
+        return None
+
+    def call(self, callable, args, new: bool) -> _Object:
+        if isinstance(args, _WrapperArgs):
+            # Only constructors creating an instance of the wrapper class may get it, as their first argument
+            constructor = isinstance(callable, _Global) and callable.path in _instance_constructor_paths
+            if not constructor or not isinstance(args[0], _Global) or new:
+                raise _JoblibError("joblib NumpyArrayWrapper class used otherwise than to create an instance of it")
+            for item in args[1:]:
+                _check_use(item)
+            if callable.path.endswith("._reconstructor") and not (
+                len(args) > 1 and isinstance(args[1], _Global) and args[1].path in ("builtins.object", "__builtin__.object")
+            ):  # noqa: E501
+                raise _JoblibError("joblib NumpyArrayWrapper created through a base class other than object")
+        else:
+            _check_use(args)
+            if not new:
+                _check_use(callable)  # calling the wrapper class (or one of its attributes) creates an instance too
+            elif isinstance(callable, _Object) and callable.is_wrapper():
+                raise _JoblibError("joblib NumpyArrayWrapper used otherwise than as an array")
+        return _Object(callable, args, new)
+
+
+def _activates_joblib_tracking(imported: Tuple[str, str]) -> bool:
+    """Whether an import is one of the classes joblib reads arrays with (or a constructor creating instances of them)."""
+    path = f"{imported[0]}.{imported[1]}"
+    return path == "numpy.dtype" or path in _instance_constructor_paths or _Global(*imported).is_wrapper()
+
+
+def _holds_wrapper(value) -> bool:
+    return isinstance(value, _Global) and value.is_wrapper()
+
+
+def _check_use(value):
+    """joblib wrapper classes and instances are only allowed where joblib's own files have them."""
+    if isinstance(value, _WrapperArgs) or _holds_wrapper(value):
+        raise _JoblibError("joblib NumpyArrayWrapper class used otherwise than to create an instance of it")
+    if isinstance(value, _Object) and value.is_wrapper():
+        raise _JoblibError("joblib NumpyArrayWrapper used otherwise than as an array")
+
+
+def _dtype_layout(dtype) -> Optional[Tuple[int, bool]]:
+    """(itemsize, holds Python objects) of a numpy.dtype pickled as numpy does, None if it cannot be told for sure."""
+    if not (isinstance(dtype, _Object) and not dtype.new and isinstance(dtype.callable, _Global) and dtype.callable.path == "numpy.dtype"):
+        return None
+    if type(dtype.args) is not tuple or not dtype.args or type(dtype.args[0]) is not str:
+        return None
+    match = re.fullmatch(r"[<>|=]?([biufcmMOSUVa])(\d*)", dtype.args[0])
+    if match is None:
+        return None
+    kind, digits = match.groups()
+    if kind == "O":
+        return 0, True
+    state = dtype.state
+    if kind in "SUVa":
+        # numpy takes the size and the flags (bit 1: holds objects) from the state, whatever the description says
+        if type(state) is not tuple or len(state) < 8 or not all(type(state[i]) in (int, bool) for i in (5, 7)):
+            return None
+        elsize, flags = state[5], state[7]
+        return (elsize, bool(flags & 1)) if 0 < elsize < 1 << 31 else None
+    # Builtin kinds: the size is the one in the description, and the state does not change it unless it has fields
+    if not digits or (state is not None and (type(state) is not tuple or len(state) < 5 or state[3] is not None or state[4] is not None)):
+        return None
+    return int(digits), False
+
+
+def _joblib_array_read(state) -> Tuple[bool, Optional[int]]:
+    """What joblib reads after a NumpyArrayWrapper given this state (see NumpyArrayWrapper.read_array)."""
+    if not isinstance(state, _Container) or state.kind != "dict" or state.opaque or not set(state.items) <= _joblib_wrapper_state_keys:
+        raise _JoblibError("cannot tell what joblib reads after a NumpyArrayWrapper: its state is not a dict of known keys")
+    shape, layout = state.items.get("shape"), _dtype_layout(state.items.get("dtype"))
+    alignment = state.items.get("numpy_array_alignment_bytes")
+    if layout is None or type(shape) is not tuple or alignment in (_before, _opaque):
+        raise _JoblibError("cannot tell what joblib reads after a NumpyArrayWrapper: its shape or dtype is not known statically")
+    itemsize, has_object = layout
+    if has_object:
+        return False, None  # a pickle of its own
+    count = 1
+    for n in shape:
+        if type(n) not in (int, bool) or n < 0:
+            raise _JoblibError("cannot tell what joblib reads after a NumpyArrayWrapper: its shape is not made of sizes")
+        count *= n
+        if count >= 1 << 63:  # joblib computes the size with 64-bit integers
+            raise _JoblibError("cannot tell what joblib reads after a NumpyArrayWrapper: its size overflows")
+    return alignment is not None, count * itemsize
+
+
 def _memo_key(op_value, pos):
     try:
         return int(op_value)
@@ -941,6 +1266,32 @@ def _memo_key(op_value, pos):
 
 def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]]:
     """Imports made by the pickles in data.
+
+    Files of joblib arrays are read like joblib.load does, raw array data skipped (see _JoblibTracker). What pickle.load would do
+    with them is then also checked, reading that data as opcodes: imports found this way are reported when dangerous.
+    """
+    start = data.tell()
+    joblib_reads = []
+    error = None
+    try:
+        globals = _read_globals(data, multiple_pickles, joblib_reads)
+    except GenOpsError as e:
+        error, globals = e, e.globals
+    if joblib_reads and globals is not None:
+        data.seek(start)
+        try:
+            plain = _read_globals(data, multiple_pickles, None)
+        except GenOpsError as e:
+            plain = e.globals or ()
+        globals.alternative.update(plain, getattr(plain, "alternative", ()))
+    if error is not None:
+        raise error
+    return globals
+
+
+def _read_globals(data: IO[bytes], multiple_pickles: bool, joblib_reads: Optional[list]) -> Set[Tuple[str, str]]:
+    """Imports made by the pickles in data, read like joblib.load does when joblib_reads is a list (what joblib reads from the file
+    is appended to it), like pickle.load does otherwise.
 
     The unpickler's stack and memo are modeled (_Reading) to know what STACK_GLOBAL imports. Two readings are followed:
     - each pickle has a stack and memo of its own, as for pickle.load (a PROTO in the middle of a pickle is a no-op, as for the
@@ -953,23 +1304,31 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
     globals = _Globals()
     resumed = None  # second reading of the pickle resuming after an embedded one
     enclosing = []  # second reading: readings of the pickles embedded ones are in
+    joblib_outer = []  # reading and tracker of the pickle a joblib object array pickle is embedded in
+    tracker = None
     # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
     last_byte = b"dummy"
     parsing_pkl_error = None
     malformed_pkl_error = None
     while last_byte != b"":
         # Opcodes are processed as they are parsed rather than collected first: their arguments can hold the model weights
-        reading = _Reading()
+        if joblib_outer:
+            reading, tracker = joblib_outer.pop()  # the joblib object array pickle is done, the pickle it is in resumes
+        else:
+            reading, tracker = _Reading(), None
         nested = resumed  # the second reading, once it differs from the first one
         resumed = None
         stack_global_underflow = None
         frame_violations = []
         first_op = True
+        reads = [] if joblib_reads is not None else None
         try:
-            for op, op_value, pos in _genops(data, frame_violations):
+            for op, op_value, pos in _genops(data, frame_violations, reads):
                 op_name = op.name
+                imported = None
                 if op_name in ("GLOBAL", "INST"):
-                    globals.add(_global_arg(op_value))
+                    imported = _global_arg(op_value)
+                    globals.add(imported)
                 elif op_name == "PROTO" and not first_op:
                     enclosing.append(nested if nested is not None else reading.copy())
                     nested = _Reading()
@@ -979,13 +1338,29 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                     operands = top[::-1].index(_mark) if _mark in top else len(top)  # values above the nearest MARK
                     if operands < 2:
                         stack_global_underflow = f"Found {operands} values for STACK_GLOBAL at position {pos} instead of 2."
-                imported = reading.apply(op, op_value, pos)
-                if imported is not None:
-                    globals.add(imported)
-                if nested is not None:
-                    imported = nested.apply(op, op_value, pos)
+                memoize_key = len(reading.memo) if tracker is not None and op_name == "MEMOIZE" else None
+                if op_name == "STACK_GLOBAL":
+                    imported = reading.apply(op, op_value, pos)
                     if imported is not None:
-                        globals.alternative.add(imported)
+                        globals.add(imported)
+                else:
+                    reading.apply(op, op_value, pos)
+                if nested is not None:
+                    nested_import = nested.apply(op, op_value, pos)
+                    if nested_import is not None:
+                        globals.alternative.add(nested_import)
+                if imported is not None and tracker is None and reads is not None and not joblib_outer:
+                    if _activates_joblib_tracking(imported):
+                        tracker = _JoblibTracker(reading.memo_lost)
+                if tracker is not None:
+                    read = tracker.step(op, op_value, imported, memoize_key)
+                    if read is not None:
+                        reads.append(read)
+                        joblib_reads.append(read)
+                        if read[1] is None:
+                            # An array of Python objects: joblib reads it as a pickle of its own, with a fresh Unpickler
+                            joblib_outer.append((reading, tracker))
+                            reading, tracker = _Reading(), None
         except (_LimitExceeded, _MissingDependency):
             raise
         except Exception as e:
