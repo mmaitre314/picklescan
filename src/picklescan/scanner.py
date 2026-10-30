@@ -37,14 +37,53 @@ class Global:
     safety: SafetyLevel
 
 
+class ScanErrorKind(Enum):
+    """Why (part of) a file could not be scanned."""
+
+    PARSE = "parse"  # pickle data could not be fully parsed: imports found before the error are still reported
+    ARCHIVE = "archive"  # an archive, or a member of it, could not be read (corrupted, encrypted...)
+    UNSUPPORTED = "unsupported"  # the format was recognized but this variant is not supported
+    MISSING_DEPENDENCY = "missing_dependency"  # an optional package needed for this format is not installed
+    LIMIT = "limit"  # a safety limit was reached (decompressed size, number of archive members...)
+    IO = "io"  # the file could not be read
+    INTERNAL = "internal"  # unexpected error in picklescan itself
+
+
+@dataclass
+class ScanError:
+    file_id: str
+    kind: ScanErrorKind
+    message: str
+
+
+@dataclass
+class SkippedFile:
+    """Content deliberately left unscanned, such as an archive nested in another one."""
+
+    file_id: str
+    reason: str
+
+
 @dataclass
 class ScanResult:
     globals: List[Global]
     scanned_files: int = 0
     issues_count: int = 0
     infected_files: int = 0
+    # True when the scan is incomplete: see errors for what failed and why
     scan_err: bool = False
     suspicious_count: int = 0
+    errors: List[ScanError] = field(default_factory=list)
+    skipped: List[SkippedFile] = field(default_factory=list)
+
+    def __post_init__(self):
+        if self.errors:
+            self.scan_err = True
+
+    def add_error(self, file_id: str, kind: ScanErrorKind, message: str) -> "ScanResult":
+        self.errors.append(ScanError(file_id, kind, message))
+        self.scan_err = True
+        return self
 
     def merge(self, sr: "ScanResult"):
         self.globals.extend(sr.globals)
@@ -53,6 +92,14 @@ class ScanResult:
         self.infected_files += sr.infected_files
         self.scan_err = self.scan_err or sr.scan_err
         self.suspicious_count += sr.suspicious_count
+        self.errors.extend(sr.errors)
+        self.skipped.extend(sr.skipped)
+
+
+def _error_result(file_id: str, kind: ScanErrorKind, message: str, scanned_files: int = 1) -> ScanResult:
+    level = logging.WARNING if kind in (ScanErrorKind.MISSING_DEPENDENCY, ScanErrorKind.UNSUPPORTED) else logging.ERROR
+    _log.log(level, f"{file_id}: {kind.value} error: {message}")
+    return ScanResult([], scanned_files=scanned_files).add_error(file_id, kind, message)
 
 
 @dataclass
@@ -855,7 +902,8 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=Fa
                 f"ERROR: parsing pickle in {file_id}: {e}",
                 exc_info=_log.isEnabledFor(logging.DEBUG),
             )
-            return _build_scan_result_from_raw_globals(e.globals, file_id, scan_err=True, strict=strict)
+            result = _build_scan_result_from_raw_globals(e.globals, file_id, strict=strict)
+            return result.add_error(file_id, ScanErrorKind.PARSE, str(e))
         else:
             # No globals found - likely not a pickle file at all
             _log.warning(f"WARNING: could not parse {file_id} as pickle: {e}")
@@ -871,13 +919,12 @@ def scan_7z_bytes(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResul
     _log.debug(f"scan_7z_bytes({file_id})")
 
     if _depth > _max_archive_depth:
-        _log.error(f"ERROR: {file_id} is nested more than {_max_archive_depth} archives deep, not scanning it")
-        return ScanResult([], scanned_files=1, scan_err=True)
+        return _error_result(file_id, ScanErrorKind.LIMIT, f"nested more than {_max_archive_depth} archives deep, not scanned")
 
     try:
         import py7zr
     except ImportError:
-        raise Exception("py7zr is required to scan 7z archives, install picklescan using: 'pip install picklescan[7z]'")
+        return _error_result(file_id, ScanErrorKind.MISSING_DEPENDENCY, "py7zr is required to scan 7z archives: pip install picklescan[7z]")
     result = ScanResult([])
 
     with py7zr.SevenZipFile(data, mode="r") as archive:
@@ -900,12 +947,15 @@ def scan_zip_bytes(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResu
     _log.debug(f"scan_zip_bytes({file_id})")
 
     if _depth > _max_archive_depth:
-        _log.error(f"ERROR: {file_id} is nested more than {_max_archive_depth} archives deep, not scanning it")
-        return ScanResult([], scanned_files=1, scan_err=True)
+        return _error_result(file_id, ScanErrorKind.LIMIT, f"nested more than {_max_archive_depth} archives deep, not scanned")
 
     result = ScanResult([])
 
-    with RelaxedZipFile(data, "r") as zip:
+    try:
+        zip = RelaxedZipFile(data, "r")
+    except (zipfile.BadZipFile, ValueError, OSError) as e:
+        return _error_result(file_id, ScanErrorKind.ARCHIVE, f"cannot open zip archive: {e}")
+    with zip:
         file_names = zip.namelist()
         _log.debug("Files in zip archive %s: %s", file_id, file_names)
         for file_name in file_names:
@@ -932,8 +982,8 @@ def scan_zip_bytes(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResu
                             result.merge(scan_pickle_bytes(io.BytesIO(data), member_id, strict=strict))
                             if read_error is not None:
                                 # Loaders reading the member as a stream run what precedes the corruption: that part was scanned
-                                _log.warning("Invalid file %s in zip archive %s: %s", file_name, file_id, read_error)
-                                result.scan_err = True
+                                message = f"cannot read zip member past byte {len(data)}: {read_error}"
+                                result.merge(_error_result(member_id, ScanErrorKind.ARCHIVE, message, 0))
                         else:
                             result.merge(scan_pickle_bytes(file, member_id, strict=strict))
 
@@ -941,9 +991,8 @@ def scan_zip_bytes(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResu
                         _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
                         result.merge(scan_numpy(file, member_id, strict=strict, _depth=_depth + 1))
             except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, EOFError, OSError) as e:
-                # Log decompression issues (password protected, corrupted, unsupported compression method...)
-                _log.warning("Invalid file %s in zip archive %s: %s", file_name, file_id, str(e))
-                result.scan_err = True
+                # Decompression issues: password protected, corrupted, unsupported compression method...
+                result.merge(_error_result(f"{file_id}:{file_name}", ScanErrorKind.ARCHIVE, f"cannot read zip member: {e}", 0))
 
     return result
 
@@ -984,7 +1033,7 @@ def scan_numpy(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
         elif version in [(2, 0), (3, 0)]:
             _, _, dtype = np.lib.format.read_array_header_2_0(data)
         else:
-            raise ValueError(f"Unsupported numpy format version: {version}")
+            return _error_result(file_id, ScanErrorKind.UNSUPPORTED, f"unsupported numpy format version: {version}")
 
         if dtype.hasobject:
             return scan_pickle_bytes(data, file_id, strict=strict)
@@ -1058,10 +1107,13 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None, strict=
         _log.debug(f"{file_id} has data in front of a zip archive, scanning both")
         data.seek(start)
         try:
-            result.merge(scan_zip_bytes(data, file_id, strict=strict, _depth=_depth))
-        except zipfile.BadZipFile as e:
+            RelaxedZipFile(data, "r").close()
+        except (zipfile.BadZipFile, ValueError, OSError) as e:
             # is_zipfile only checks for an end record: if no zip reader can open the archive, there is nothing to load from it
             _log.warning(f"WARNING: could not open the zip archive embedded in {file_id}: {e}")
+        else:
+            data.seek(start)
+            result.merge(scan_zip_bytes(data, file_id, strict=strict, _depth=_depth))
 
     return result
 
@@ -1118,10 +1170,20 @@ def scan_huggingface_model(repo_id, strict=False):
             _log.debug("Skipping file %s in model %s: not a format we scan", file_name, repo_id)
             continue
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
-        data = io.BytesIO(_http_get(url))
-        scan_result.merge(scan_bytes(data, url, file_ext, strict=strict))
+        scan_result.merge(_isolated(lambda: scan_bytes(io.BytesIO(_http_get(url)), url, file_ext, strict=strict), url))
 
     return scan_result
+
+
+def _isolated(scan, file_id: str) -> ScanResult:
+    """Runs one file's scan so that a failure is recorded for that file instead of aborting a multi-file scan."""
+    try:
+        return scan()
+    except OSError as e:
+        return _error_result(file_id, ScanErrorKind.IO, str(e))
+    except Exception as e:
+        _log.exception(f"Unexpected error scanning {file_id}")
+        return _error_result(file_id, ScanErrorKind.INTERNAL, f"{type(e).__name__}: {e}")
 
 
 def _matches_any(patterns: List[re.Pattern], text: str) -> bool:
@@ -1166,13 +1228,17 @@ def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None, strict=F
             if not os.path.isfile(file_path):
                 _log.debug("Skipping %s: not a regular file", file_path)
                 continue
-            with open(file_path, "rb") as file:
-                if not _should_scan(file.read(_probe_size), file_ext):
-                    _log.debug("Skipping file %s: not a format we scan", file_path)
-                    continue
-                file.seek(0)
-                _log.debug("Scanning file %s", file_path)
-                scan_result.merge(scan_bytes(file, file_path, file_ext, strict=strict))
+
+            def scan_one(file_path=file_path, file_ext=file_ext) -> ScanResult:
+                with open(file_path, "rb") as file:
+                    if not _should_scan(file.read(_probe_size), file_ext):
+                        _log.debug("Skipping file %s: not a format we scan", file_path)
+                        return ScanResult([])
+                    file.seek(0)
+                    _log.debug("Scanning file %s", file_path)
+                    return scan_bytes(file, file_path, file_ext, strict=strict)
+
+            scan_result.merge(_isolated(scan_one, file_path))
 
     return scan_result
 

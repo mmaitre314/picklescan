@@ -17,7 +17,14 @@ def print_summary(show_globals: bool, sr: ScanResult):
 Scanned files: {sr.scanned_files}
 Infected files: {sr.infected_files}
 Suspicious globals: {sr.suspicious_count}
-Dangerous globals: {sr.issues_count}""")
+Dangerous globals: {sr.issues_count}
+Scan errors: {len(sr.errors)}""")
+    for error in sr.errors:
+        _log.info(f"  ! {error.file_id}: {error.kind.value} error: {error.message}")
+    if sr.skipped:
+        _log.info(f"Not scanned: {len(sr.skipped)}")
+        for skipped in sr.skipped:
+            _log.info(f"  - {skipped.file_id}: {skipped.reason}")
     if show_globals and len(sr.globals) > 0:
         _log.info("All globals found:")
         for g in sr.globals:
