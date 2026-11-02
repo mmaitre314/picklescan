@@ -22,6 +22,9 @@ Scan a malicious model on [Hugging Face](https://huggingface.co/):
 pip install picklescan
 picklescan --huggingface ykilcher/totally-harmless-model
 ```
+
+picklescan requires Python 3.11 or later: Python 3.10 reached its end of life in October 2026.
+
 The scanner reports that the Pickle is calling `eval()` to execute arbitrary code:
 ```bash
 https://huggingface.co/ykilcher/totally-harmless-model/resolve/main/pytorch_model.bin (archive/data.pkl): dangerous import __builtin__.eval FOUND
