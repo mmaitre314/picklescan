@@ -44,7 +44,7 @@ jobs:
             echo "::error::Expected exit code 1 for malicious file, got $code"
             exit 1
           fi
-          echo "$output" | grep -q "dangerous import '__builtin__ eval' FOUND"
+          echo "$output" | grep -q "dangerous import __builtin__.eval FOUND"
           echo "$output" | grep -q "Infected files: 1"
       - name: Install test packages
         run: |

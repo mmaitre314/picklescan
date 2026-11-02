@@ -18,17 +18,17 @@ Scanned files: {sr.scanned_files}
 Infected files: {sr.infected_files}
 Suspicious globals: {sr.suspicious_count}
 Dangerous globals: {sr.issues_count}
-Scan errors: {len(sr.errors)}""")
+Scan errors: {len(sr.errors)}
+Not scanned: {len(sr.skipped)}""")
     for error in sr.errors:
-        _log.info(f"  ! {error.file_id}: {error.kind.value} error: {error.message}")
-    if sr.skipped:
-        _log.info(f"Not scanned: {len(sr.skipped)}")
-        for skipped in sr.skipped:
-            _log.info(f"  - {skipped.file_id}: {skipped.reason}")
+        _log.info("\n" + error.format())
+    for skipped in sr.skipped:
+        _log.info("\n" + skipped.format())
     if show_globals and len(sr.globals) > 0:
         _log.info("All globals found:")
         for g in sr.globals:
-            _log.info(f"  * {g.module}.{g.name} - {g.safety.value}")
+            where = f"{g.location.describe()}: " if g.location is not None else ""
+            _log.info(f"  * {where}{g.module}.{g.name} - {g.safety.value}")
 
 
 def main():

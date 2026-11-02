@@ -33,11 +33,35 @@ class SafetyLevel(Enum):
     Dangerous = "dangerous"
 
 
+@dataclass(frozen=True)
+class Location:
+    """Where something was found: a file (path or URL) and, for content inside archives or compressed files, the archive members
+    leading to it, outermost first."""
+
+    file: str
+    members: Tuple[str, ...] = ()
+
+    def member(self, name: str) -> "Location":
+        return Location(self.file, self.members + (name,))
+
+    def __str__(self) -> str:
+        return self.file + "".join(f":{member}" for member in self.members)
+
+    def describe(self) -> str:
+        """file.zip (inner/model.pkl), with " > " between nesting levels."""
+        return f"{self.file} ({' > '.join(self.members)})" if self.members else self.file
+
+
+def _location(file_id) -> Location:
+    return file_id if isinstance(file_id, Location) else Location(str(file_id))
+
+
 @dataclass
 class Global:
     module: str
     name: str
     safety: SafetyLevel
+    location: Optional[Location] = field(default=None, compare=False)  # where the import was found
 
 
 class ScanErrorKind(Enum):
@@ -52,19 +76,57 @@ class ScanErrorKind(Enum):
     INTERNAL = "internal"  # unexpected error in picklescan itself
 
 
+# What each kind of error means for the scan result
+_error_help = {
+    ScanErrorKind.PARSE: "imports found up to this point are reported; what follows was not scanned",
+    ScanErrorKind.ARCHIVE: "the content that could not be read was not scanned",
+    ScanErrorKind.UNSUPPORTED: "this content was not scanned",
+    ScanErrorKind.MISSING_DEPENDENCY: "this content was not scanned",
+    ScanErrorKind.LIMIT: "the rest of this content was not scanned; raise the limit (ScanLimits) if the file is trusted",
+    ScanErrorKind.IO: "this file was not scanned",
+    ScanErrorKind.INTERNAL: "this file was not scanned; this is a bug in picklescan, please report it",
+}
+
+
 @dataclass
 class ScanError:
-    file_id: str
+    location: Location
     kind: ScanErrorKind
     message: str
+    offset: Optional[int] = None  # byte offset in the (decompressed) content, where known
+    help: Optional[str] = None
+
+    def __post_init__(self):
+        self.location = _location(self.location)
+        if self.help is None:
+            self.help = _error_help[self.kind]
+
+    @property
+    def file_id(self) -> str:
+        return str(self.location)
+
+    def format(self) -> str:
+        """Multi-line description, in the style of compiler diagnostics."""
+        where = self.location.describe() + (f", offset {self.offset}" if self.offset is not None else "")
+        return f"error[{self.kind.value}]: {self.message}\n --> {where}\n  = note: {self.help}"
 
 
 @dataclass
 class SkippedFile:
     """Content deliberately left unscanned, such as an archive nested in another one."""
 
-    file_id: str
+    location: Location
     reason: str
+
+    def __post_init__(self):
+        self.location = _location(self.location)
+
+    @property
+    def file_id(self) -> str:
+        return str(self.location)
+
+    def format(self) -> str:
+        return f"skipped: {self.reason}\n --> {self.location.describe()}"
 
 
 @dataclass
@@ -83,8 +145,8 @@ class ScanResult:
         if self.errors:
             self.scan_err = True
 
-    def add_error(self, file_id: str, kind: ScanErrorKind, message: str) -> "ScanResult":
-        self.errors.append(ScanError(file_id, kind, message))
+    def add_error(self, file_id, kind: ScanErrorKind, message: str, offset: Optional[int] = None) -> "ScanResult":
+        self.errors.append(ScanError(_location(file_id), kind, message, offset))
         self.scan_err = True
         return self
 
@@ -145,6 +207,12 @@ class FileInfo:
     trailing_zip: bool = False  # a zip archive follows other content: zip readers find it from the end of the file
     members: List["FileInfo"] = field(default_factory=list)  # archive members, or the content of a compressed file
     note: Optional[str] = None  # why the content was not (fully) inspected
+    location: Optional[Location] = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self):
+        if self.location is None:
+            self.location = _location(self.file_id)
+        self.file_id = str(self.location)
 
 
 class _LimitExceeded(Exception):
@@ -177,10 +245,10 @@ class _ScanContext:
             raise _LimitExceeded(f"more than {self.limits.max_archive_members} archive members (ScanLimits.max_archive_members)")
 
 
-def _error_result(file_id: str, kind: ScanErrorKind, message: str, scanned_files: int = 1) -> ScanResult:
+def _error_result(file_id, kind: ScanErrorKind, message: str, scanned_files: int = 1, offset: Optional[int] = None) -> ScanResult:
     level = logging.WARNING if kind in (ScanErrorKind.MISSING_DEPENDENCY, ScanErrorKind.UNSUPPORTED) else logging.ERROR
-    _log.log(level, f"{file_id}: {kind.value} error: {message}")
-    return ScanResult([], scanned_files=scanned_files).add_error(file_id, kind, message)
+    _log.log(level, f"{_location(file_id).describe()}: {kind.value} error: {message}")
+    return ScanResult([], scanned_files=scanned_files).add_error(file_id, kind, message, offset)
 
 
 @dataclass
@@ -203,9 +271,10 @@ class ScanFilter:
 
 
 class GenOpsError(Exception):
-    def __init__(self, msg: str, globals: Optional[Set[Tuple[str, str]]]):
+    def __init__(self, msg: str, globals: Optional[Set[Tuple[str, str]]], offset: Optional[int] = None):
         self.msg = msg
         self.globals = globals
+        self.offset = offset
         super().__init__()
 
     def __str__(self) -> str:
@@ -487,6 +556,14 @@ def _http_get(url, max_bytes: Optional[int] = None, _redirects: int = 0) -> byte
         conn.close()
 
 
+class _OpcodeError(ValueError):
+    """A pickle parsing error, at the opcode starting at position."""
+
+    def __init__(self, position: int, message: str):
+        super().__init__(message)
+        self.position = position
+
+
 class _SkippedBytes:
     """Stands in for an argument too large to be a module or global name (tensor data, typically): only its size is kept.
 
@@ -696,18 +773,23 @@ def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None, jobli
         entry = _opcode_table.get(code)
         if entry is None:
             if code == b"":
-                raise ValueError("pickle exhausted before seeing STOP")
-            raise ValueError(f"at position {pos}, opcode {code!r} unknown")
+                raise _OpcodeError(pos, f"pickle data ends at position {pos} before a STOP opcode (truncated, or not a pickle)")
+            raise _OpcodeError(pos, f"unknown opcode {code!r} at position {pos}")
         opcode, reader, counted_reader, size = entry
-        if counted_reader is not None:
-            arg, size = counted_reader(data)
-            end_pos = pos + 1 + size
-        elif reader is None:
-            arg = None
-            end_pos = pos + 1
-        else:
-            arg = reader(data)
-            end_pos = pos + 1 + size
+        try:
+            if counted_reader is not None:
+                arg, size = counted_reader(data)
+                end_pos = pos + 1 + size
+            elif reader is None:
+                arg = None
+                end_pos = pos + 1
+            else:
+                arg = reader(data)
+                end_pos = pos + 1 + size
+        except (_LimitExceeded, _MissingDependency):
+            raise
+        except Exception as e:
+            raise _OpcodeError(pos, f"invalid argument for {opcode.name} at position {pos}: {e}") from e
 
         if frame_end is not None:
             if pos >= frame_end:
@@ -1310,6 +1392,7 @@ def _read_globals(data: IO[bytes], multiple_pickles: bool, joblib_reads: Optiona
     last_byte = b"dummy"
     parsing_pkl_error = None
     malformed_pkl_error = None
+    error_offset = None
     while last_byte != b"":
         # Opcodes are processed as they are parsed rather than collected first: their arguments can hold the model weights
         if joblib_outer:
@@ -1337,7 +1420,7 @@ def _read_globals(data: IO[bytes], multiple_pickles: bool, joblib_reads: Optiona
                     top = reading.stack[-2:]
                     operands = top[::-1].index(_mark) if _mark in top else len(top)  # values above the nearest MARK
                     if operands < 2:
-                        stack_global_underflow = f"Found {operands} values for STACK_GLOBAL at position {pos} instead of 2."
+                        stack_global_underflow = (f"STACK_GLOBAL at position {pos} has {operands} operand(s) instead of 2", pos)
                 memoize_key = len(reading.memo) if tracker is not None and op_name == "MEMOIZE" else None
                 if op_name == "STACK_GLOBAL":
                     imported = reading.apply(op, op_value, pos)
@@ -1353,7 +1436,10 @@ def _read_globals(data: IO[bytes], multiple_pickles: bool, joblib_reads: Optiona
                     if _activates_joblib_tracking(imported):
                         tracker = _JoblibTracker(reading.memo_lost)
                 if tracker is not None:
-                    read = tracker.step(op, op_value, imported, memoize_key)
+                    try:
+                        read = tracker.step(op, op_value, imported, memoize_key)
+                    except _JoblibError as e:
+                        raise _OpcodeError(pos, f"{e} ({op_name} at position {pos})") from e
                     if read is not None:
                         reads.append(read)
                         joblib_reads.append(read)
@@ -1366,6 +1452,7 @@ def _read_globals(data: IO[bytes], multiple_pickles: bool, joblib_reads: Optiona
         except Exception as e:
             _log.debug(f"Error parsing pickle: {e}", exc_info=True)
             parsing_pkl_error = str(e)
+            error_offset = e.position if isinstance(e, _OpcodeError) else None
         else:
             if enclosing:
                 resumed = enclosing.pop()  # second reading: the embedded pickle is done, the enclosing one resumes
@@ -1373,13 +1460,14 @@ def _read_globals(data: IO[bytes], multiple_pickles: bool, joblib_reads: Optiona
             # of the pickle parsed fine: random binary data trips over this regularly before hitting an invalid opcode, and should
             # keep being reported as "not a pickle" rather than as a scan error.
             if stack_global_underflow is not None and malformed_pkl_error is None:
-                malformed_pkl_error = stack_global_underflow
+                malformed_pkl_error, error_offset = stack_global_underflow
         if frame_violations:
             # Reported even if pickletools later fails to parse this pickle: the C unpickler may well parse it differently
             _log.debug(f"Pickle frame violation: {frame_violations[0]}")
             globals.add(_frame_violation_global)
             if malformed_pkl_error is None:
                 malformed_pkl_error = frame_violations[0]
+                error_offset = int(re.search(r"at position (\d+)", frame_violations[0]).group(1))
         last_byte = data.read(1)
         if last_byte != b"":
             # Rewind the peeked byte so the next genops pass starts on it
@@ -1396,10 +1484,10 @@ def _read_globals(data: IO[bytes], multiple_pickles: bool, joblib_reads: Optiona
             # A pickle known to be malformed is reported with its (possibly empty) globals rather than as "not a pickle" (None).
             found = len(globals) > 0 or len(globals.alternative) > 0
             globals_opt = globals if found or malformed_pkl_error is not None else None
-            raise GenOpsError(parsing_pkl_error, globals_opt)
+            raise GenOpsError(parsing_pkl_error, globals_opt, error_offset)
 
     if malformed_pkl_error is not None:
-        raise GenOpsError(malformed_pkl_error, globals)
+        raise GenOpsError(malformed_pkl_error, globals, error_offset)
 
     return globals
 
@@ -1413,9 +1501,10 @@ def _build_scan_result_from_raw_globals(
     globals = []
     suspicious_count = 0
     issues_count = 0
+    location = _location(file_id)
     alternative = set(getattr(raw_globals, "alternative", ())) - set(raw_globals)
     for rg in list(raw_globals) + sorted(alternative):
-        g = Global(rg[0], rg[1], SafetyLevel.Dangerous)
+        g = Global(rg[0], rg[1], SafetyLevel.Dangerous, location)
         safe_filter = _safe_globals.get(g.module)
         unsafe_filter = _unsafe_globals.get(g.module)
 
@@ -1430,23 +1519,17 @@ def _build_scan_result_from_raw_globals(
 
         if "unknown" in g.module or "unknown" in g.name:
             g.safety = SafetyLevel.Dangerous
-            _log.warning("%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name)
+            _log.warning("%s: %s import %s.%s FOUND", location.describe(), g.safety.value, g.module, g.name)
             issues_count += 1
         elif unsafe_filter is not None and (unsafe_filter == "*" or g.name in unsafe_filter):
             g.safety = SafetyLevel.Dangerous
-            _log.warning("%s: %s import '%s %s' FOUND", file_id, g.safety.value, g.module, g.name)
+            _log.warning("%s: %s import %s.%s FOUND", location.describe(), g.safety.value, g.module, g.name)
             issues_count += 1
         elif safe_filter is not None and (safe_filter == "*" or g.name in safe_filter):
             g.safety = SafetyLevel.Innocuous
         elif strict:
             g.safety = SafetyLevel.Dangerous
-            _log.warning(
-                "%s: %s import '%s %s' FOUND (promoted by --strict)",
-                file_id,
-                g.safety.value,
-                g.module,
-                g.name,
-            )
+            _log.warning("%s: %s import %s.%s FOUND (promoted by --strict)", location.describe(), g.safety.value, g.module, g.name)
             issues_count += 1
         else:
             g.safety = SafetyLevel.Suspicious
@@ -1469,15 +1552,12 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=Fa
     except GenOpsError as e:
         if e.globals is not None:
             # Found some globals before error - could be a malicious partial pickle
-            _log.error(
-                f"ERROR: parsing pickle in {file_id}: {e}",
-                exc_info=_log.isEnabledFor(logging.DEBUG),
-            )
+            _log.error(f"{_location(file_id).describe()}: error parsing pickle: {e}", exc_info=_log.isEnabledFor(logging.DEBUG))
             result = _build_scan_result_from_raw_globals(e.globals, file_id, strict=strict)
-            return result.add_error(file_id, ScanErrorKind.PARSE, str(e))
+            return result.add_error(file_id, ScanErrorKind.PARSE, str(e), e.offset)
         else:
             # No globals found - likely not a pickle file at all
-            _log.warning(f"WARNING: could not parse {file_id} as pickle: {e}")
+            _log.debug(f"{_location(file_id).describe()}: not a pickle ({e})")
             return ScanResult([], scanned_files=1, scan_err=False)
 
     _log.debug("Global imports in %s: %s", file_id, raw_globals)
@@ -1756,7 +1836,10 @@ def _zip_format(data: IO[bytes]) -> FileFormat:
         return FileFormat.ZIP  # reported when the archive is scanned
     finally:
         data.seek(start)
-    if any(name == "data.pkl" or name.endswith("/data.pkl") for name in names):
+    # torch.save and torch.jit.save put everything in a single folder, with the pickle and a format version
+    roots = {name.split("/", 1)[0] for name in names}
+    root = next(iter(roots)) if len(roots) == 1 else None
+    if root is not None and f"{root}/data.pkl" in names and (f"{root}/version" in names or f"{root}/.data/version" in names):
         return FileFormat.PYTORCH_ZIP
     if names and all(name.endswith(".npy") for name in names):
         return FileFormat.NUMPY_ZIP
@@ -1836,7 +1919,8 @@ def _walk(
     head = data.read(_head_size)
     data.seek(start)
     fmt, compression = _sniff(data, head, file_ext)
-    info = FileInfo(file_id, fmt, compression=compression)
+    info = FileInfo(str(file_id), fmt, compression=compression, location=_location(file_id))
+    file_id = info.location
     if fmt is FileFormat.PICKLE:
         info.pickle_protocol = head[1]
     elif fmt is FileFormat.PYTORCH_LEGACY and head[:1] == b"\x80":
@@ -1873,7 +1957,7 @@ def _walk(
         # torch.load tries legacy files as tar archives before anything else
         _log.debug(f"{file_id} is also a tar archive, scanning both")
         data.seek(start)
-        info.members.append(_walk_archive(data, FileInfo(file_id, FileFormat.TAR), ctx, depth, _walk_tar_members))
+        info.members.append(_walk_archive(data, FileInfo(str(file_id), FileFormat.TAR, location=file_id), ctx, depth, _walk_tar_members))
     # Zip readers find an archive from the end of the file. Not in tar and 7z archives: what is at their end is a member.
     if fmt not in (FileFormat.ZIP, FileFormat.PYTORCH_ZIP, FileFormat.NUMPY_ZIP, FileFormat.TAR, FileFormat.SEVEN_ZIP) and cheap_seek:
         data.seek(start)
@@ -1888,13 +1972,15 @@ def _walk(
         if info.trailing_zip:
             _log.debug(f"{file_id} has data in front of a zip archive, scanning both")
             data.seek(start)
-            info.members.append(_walk_archive(data, FileInfo(file_id, FileFormat.ZIP), ctx, depth, _walk_zip_members))
+            info.members.append(
+                _walk_archive(data, FileInfo(str(file_id), FileFormat.ZIP, location=file_id), ctx, depth, _walk_zip_members)
+            )
     data.seek(start)
     return info
 
 
 def _walk_format(data, info: FileInfo, file_ext, ctx: _ScanContext, depth: int, layers: int, size: Optional[int]):
-    fmt, file_id = info.format, info.file_id
+    fmt, file_id = info.format, info.location
     if fmt is FileFormat.NUMPY:
         if ctx.scan:
             ctx.result.merge(_scan_numpy(data, file_id, ctx))
@@ -1926,7 +2012,16 @@ def _walk_format(data, info: FileInfo, file_ext, ctx: _ScanContext, depth: int, 
                         data.seek(compressed_start)
                         content = _counted(_open_decompressed(data, info.compression), ctx)
                 with content:
-                    info.members.append(_walk(content, file_id, _inner_extension(file_id), ctx, depth, layers + 1))
+                    info.members.append(
+                        _walk(
+                            content,
+                            file_id,
+                            _inner_extension(file_id.members[-1] if file_id.members else file_id.file),
+                            ctx,
+                            depth,
+                            layers + 1,
+                        )
+                    )
         except (OSError, EOFError, zlib.error, lzma.LZMAError, ValueError, RuntimeError) as e:
             read_error = e
         if read_error is not None:
@@ -1957,8 +2052,8 @@ def _walk_archive(data, info: FileInfo, ctx: _ScanContext, depth: int, walk_memb
     if depth >= ctx.limits.max_archive_depth + extra_level:
         info.note = f"{info.format.value} archive nested in another archive: not opened (ScanLimits.max_archive_depth)"
         if ctx.scan:
-            _log.info(f"{info.file_id}: {info.note}")
-            ctx.result.skipped.append(SkippedFile(info.file_id, info.note))
+            _log.info(f"{info.location.describe()}: {info.note}")
+            ctx.result.skipped.append(SkippedFile(info.location, info.note))
         return info
     walk_members(data, info, ctx, depth + 1)
     return info
@@ -1971,7 +2066,7 @@ def _walk_zip_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
     except (zipfile.BadZipFile, ValueError, OSError, NotImplementedError) as e:
         info.note = f"cannot open zip archive: {e}"
         if ctx.scan:
-            ctx.result.merge(_error_result(info.file_id, ScanErrorKind.ARCHIVE, info.note))
+            ctx.result.merge(_error_result(info.location, ScanErrorKind.ARCHIVE, info.note))
         return
     with zip:
         names = zip.namelist()
@@ -1984,7 +2079,7 @@ def _walk_zip_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
             if member.is_dir() or member.header_offset in seen_offsets:
                 continue
             seen_offsets.add(member.header_offset)
-            member_id = f"{info.file_id}:{member.filename}"
+            member_id = info.location.member(member.filename)
             member_ext = os.path.splitext(member.filename)[1]
             if member.filename in storage_records:
                 continue  # raw tensor data, never unpickled
@@ -1996,7 +2091,7 @@ def _walk_zip_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
                     info.members.append(_walk(file, member_id, member_ext, ctx, depth, 0, size=member.file_size))
             except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, EOFError, OSError, ValueError) as e:
                 # Decompression issues: password protected, corrupted, unsupported compression method...
-                info.members.append(FileInfo(member_id, FileFormat.UNKNOWN, note=f"cannot read zip member: {e}"))
+                info.members.append(FileInfo(str(member_id), FileFormat.UNKNOWN, note=f"cannot read zip member: {e}", location=member_id))
                 if ctx.scan:
                     ctx.result.merge(_error_result(member_id, ScanErrorKind.ARCHIVE, f"cannot read zip member: {e}", 0))
 
@@ -2054,10 +2149,10 @@ def _walk_7z_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
                 root = os.path.realpath(tmpdir)
                 for member in members:
                     path = os.path.realpath(os.path.join(tmpdir, member.filename))
-                    member_id = f"{info.file_id}:{member.filename}"
+                    member_id = info.location.member(member.filename)
                     if not path.startswith(root + os.sep) or not os.path.isfile(path):
                         note = "not a regular file of the archive (link, special file...): not scanned"
-                        info.members.append(FileInfo(member_id, FileFormat.UNKNOWN, note=note))
+                        info.members.append(FileInfo(str(member_id), FileFormat.UNKNOWN, note=note, location=member_id))
                         if ctx.scan:
                             ctx.result.skipped.append(SkippedFile(member_id, note))
                         continue
@@ -2068,7 +2163,7 @@ def _walk_7z_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
     except Exception as e:
         info.note = f"cannot read 7z archive: {e}"
         if ctx.scan:
-            ctx.result.merge(_error_result(info.file_id, ScanErrorKind.ARCHIVE, info.note))
+            ctx.result.merge(_error_result(info.location, ScanErrorKind.ARCHIVE, info.note))
 
 
 def _walk_tar_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
@@ -2082,13 +2177,13 @@ def _walk_tar_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
                 ctx.count_member()
                 if not member.isfile():
                     continue
-                member_id = f"{info.file_id}:{member.name}"
+                member_id = info.location.member(member.name)
                 with tar.extractfile(member) as file:
                     info.members.append(_walk(file, member_id, os.path.splitext(member.name)[1], ctx, depth, 0, size=member.size))
     except (tarfile.TarError, OSError, EOFError, zlib.error, lzma.LZMAError) as e:
         info.note = f"cannot read tar archive: {e}"
         if ctx.scan:
-            ctx.result.merge(_error_result(info.file_id, ScanErrorKind.ARCHIVE, info.note))
+            ctx.result.merge(_error_result(info.location, ScanErrorKind.ARCHIVE, info.note))
 
 
 def _scan_pytorch_legacy(data: IO[bytes], file_id: str, ctx: _ScanContext) -> ScanResult:
