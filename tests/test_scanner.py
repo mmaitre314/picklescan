@@ -2,6 +2,7 @@ import http.client
 from collections import OrderedDict
 import importlib
 import bz2
+import collections
 import gzip
 import io
 import lzma
@@ -74,9 +75,16 @@ class HTTPResponse:
         self.reason = "mock reason"
         self.data = data
         self.headers = headers or {}
+        self.offset = 0
 
     def read(self, amt=None):
-        return self.data if amt is None else bytes(self.data[:amt])
+        data = bytes(self.data or b"")
+        chunk = data[self.offset :] if amt is None else data[self.offset : self.offset + amt]
+        self.offset += len(chunk)
+        return chunk
+
+    def getheader(self, name, default=None):
+        return self.headers.get(name, default)
 
 
 def _malicious_zip() -> bytes:
@@ -88,12 +96,14 @@ def _malicious_zip() -> bytes:
 
 # Files of a mock Hugging Face repo, to check that files are picked by content rather than extension
 _sniffing_repo_files = {
-    "model": _malicious_zip(),  # extensionless PyTorch zip
+    "model": _malicious_zip(),  # extensionless zip
     "weights.data-00000": pickle.dumps(Malicious1()),  # unknown extension, pickle content
-    "model.safetensors": (640).to_bytes(8, "little") + b"x" * 1000,  # header length starts with \x80\x02, like a pickle
+    "legacy": pickle.dumps(Malicious1(), protocol=0),  # no extension, and protocol 0 pickles have no magic bytes
+    "model.safetensors": (640).to_bytes(8, "little") + b"x" * (20 << 20),  # header length starts with \x80\x02, like a pickle
     "README.md": b"# Totally harmless",
 }
-_sniffing_repo_requests = []
+_served_bytes = collections.Counter()  # bytes of each file of the mock Hugging Face repo sent so far
+_served_by_path = collections.Counter()  # bytes sent so far, by URL path
 
 
 class MockHTTPSConnection:
@@ -102,22 +112,47 @@ class MockHTTPSConnection:
         self.response = None
 
     def request(self, method, path_and_query, headers=None):
+        self._request(method, path_and_query)
+        # Range requests, for every URL
+        range_header = (headers or {}).get("Range")
+        if range_header is not None and self.response.status == 200 and "/norange/" not in path_and_query:
+            data = bytes(self.response.data)
+            start, end = (int(n) for n in range_header[len("bytes=") :].split("-"))
+            if start >= len(data):
+                self.response = HTTPResponse(416, b"")
+            else:
+                chunk = data[start : end + 1]
+                total = "*" if "/unknowntotal/" in path_and_query else len(data)
+                content_range = f"bytes {start}-{start + len(chunk) - 1}/{total}"
+                if "/badrange/" in path_and_query:
+                    content_range = f"bytes {start + 1}-{start + len(chunk)}/{len(data)}"
+                self.response = HTTPResponse(206, chunk, {"Content-Range": content_range})
+        sniffing_prefix = "/mock/sniffing-model/resolve/main/"
+        if path_and_query.startswith(sniffing_prefix):
+            _served_bytes[path_and_query[len(sniffing_prefix) :]] += len(self.response.data or b"")
+        _served_by_path[path_and_query] += len(self.response.data or b"")
+
+    def _request(self, method, path_and_query):
         assert self.response is None
         target = f"{method} https://{self.host}{path_and_query}"
         sniffing_prefix = "GET https://huggingface.co/mock/sniffing-model/resolve/main/"
         if target.startswith(sniffing_prefix):
-            name = target[len(sniffing_prefix) :]
-            range_header = (headers or {}).get("Range")
-            _sniffing_repo_requests.append((name, range_header))
-            data = _sniffing_repo_files[name]
-            if range_header is not None:
-                end = int(range_header.split("-")[1])
-                self.response = HTTPResponse(206, data[: end + 1])
-            else:
-                self.response = HTTPResponse(200, data)
+            self.response = HTTPResponse(200, _sniffing_repo_files[target[len(sniffing_prefix) :]])
         elif target == "GET https://huggingface.co/api/models/mock/sniffing-model":
             siblings = [{"rfilename": name} for name in _sniffing_repo_files]
             self.response = HTTPResponse(200, json.dumps({"siblings": siblings}).encode())
+        elif target == "GET https://localhost/mock/norange/pickle/malicious":  # a server ignoring Range requests
+            self.response = HTTPResponse(200, pickle.dumps(Malicious1()))
+        elif target in ("GET https://localhost/mock/unknowntotal/pickle/malicious", "GET https://localhost/mock/badrange/pickle/malicious"):
+            self.response = HTTPResponse(200, pickle.dumps(Malicious1()))
+        elif target == "GET https://localhost/mock/empty":
+            self.response = HTTPResponse(200, b"")
+        elif target == "GET https://huggingface.co/api/models/mock/quoted-model":
+            self.response = HTTPResponse(200, json.dumps({"siblings": [{"rfilename": "dir/my model#1.pkl"}]}).encode())
+        elif target == "GET https://huggingface.co/mock/quoted-model/resolve/main/dir/my%20model%231.pkl":
+            self.response = HTTPResponse(200, pickle.dumps(Malicious1()))
+        elif target == "GET https://localhost/mock/weights/malicious":
+            self.response = HTTPResponse(200, pickle.dumps([b"\x00" * (8 << 20), Malicious1()], protocol=4))
         elif target == "GET https://localhost/mock/200":
             self.response = HTTPResponse(200, b"mock123")
         elif target == "GET https://localhost/mock/400":
@@ -191,7 +226,7 @@ def compare_scan_results(sr1: ScanResult, sr2: ScanResult):
 def test_http_get():
     assert _http_get("https://localhost/mock/200") == b"mock123"
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(OSError):
         _http_get("https://localhost/mock/400")
 
 
@@ -1842,7 +1877,7 @@ def test_scan_directory_path():
 
 def test_http_redirects():
     assert _http_get("https://localhost/mock/redirect/relative") == pickle.dumps(Malicious2())
-    with pytest.raises(RuntimeError, match="too many redirections"):
+    with pytest.raises(OSError, match="too many redirections"):
         _http_get("https://localhost/mock/redirect/loop")
 
 
@@ -1876,20 +1911,37 @@ def test_scan_url():
     compare_scan_results(scan_url("https://localhost/mock/zip/malicious"), malicious_zip)
 
 
+def test_remote_files():
+    eval_found = ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
+    # a range answered without the size of the file: the whole file is downloaded
+    compare_scan_results(scan_url("https://localhost/mock/unknowntotal/pickle/malicious"), eval_found)
+    # an empty file answers range requests with 416
+    compare_scan_results(scan_url("https://localhost/mock/empty"), ScanResult([], 1, 0, 0))
+    # a range other than the one requested is an error
+    with pytest.raises(OSError, match="Content-Range"):
+        scan_url("https://localhost/mock/badrange/pickle/malicious")
+    # file names are quoted in Hugging Face URLs
+    result = scan_huggingface_model("mock/quoted-model")
+    assert [g.name for g in result.globals] == ["eval"] and not result.scan_err, result
+    # seeking before the start of the file fails like for local files
+    with scanner_module._RemoteFile("https://localhost/mock/pickle/benign") as remote:
+        with pytest.raises(OSError):
+            remote.seek(-100, io.SEEK_END)
+
+
 def test_scan_huggingface_model():
     eval_sr = ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1)
     compare_scan_results(scan_huggingface_model("ykilcher/totally-harmless-model"), eval_sr)
 
 
 def test_scan_huggingface_model_by_content():
-    _sniffing_repo_requests.clear()
+    _served_bytes.clear()
     result = scan_huggingface_model("mock/sniffing-model")
-    compare_scan_results(result, ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)] * 2, 2, 2, 2))
-    # every file is probed with a ranged request, and only the ones that look scannable are downloaded in full
-    full_downloads = sorted(name for name, range_header in _sniffing_repo_requests if range_header is None)
-    probes = sorted(name for name, range_header in _sniffing_repo_requests if range_header is not None)
-    assert full_downloads == ["model", "weights.data-00000"]
-    assert probes == sorted(_sniffing_repo_files)
+    evals = [Global("builtins", "eval", SafetyLevel.Dangerous)] * 2 + [Global("__builtin__", "eval", SafetyLevel.Dangerous)]
+    compare_scan_results(result, ScanResult(evals, 5, 3, 3))
+    # every file is scanned by content, but only what the scan reads is downloaded: not the 20 MB of the safetensors file
+    assert set(_served_bytes) == set(_sniffing_repo_files)
+    assert _served_bytes["model.safetensors"] <= 2 << 20
 
 
 def test_scan_directory_path_by_content(tmp_path):
@@ -1903,10 +1955,27 @@ def test_scan_directory_path_by_content(tmp_path):
         Global("numpy", "ndarray", SafetyLevel.Innocuous),
         Global("numpy", "dtype", SafetyLevel.Innocuous),
     ]
-    compare_scan_results(
-        scan_directory_path(str(tmp_path)),
-        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)] * 2 + numpy_globals * 2, 4, 2, 2),
-    )
+    evals = [Global("builtins", "eval", SafetyLevel.Dangerous)] * 2 + [Global("__builtin__", "eval", SafetyLevel.Dangerous)]
+    compare_scan_results(scan_directory_path(str(tmp_path)), ScanResult(evals + numpy_globals * 2, 7, 3, 3))
+
+
+def test_scan_url_reads_only_what_it_needs():
+    _served_by_path.clear()
+    assert _finds_eval(scan_url("https://localhost/mock/weights/malicious"))
+    assert _served_by_path["/mock/weights/malicious"] < 1 << 20  # the 8 MB of in-band weights are skipped, not downloaded
+    assert _finds_eval(scan_url("https://localhost/mock/norange/pickle/malicious"))  # no Range support: downloaded in full
+
+
+def test_text_is_not_reported_as_pickle(tmp_path):
+    # Text parses as a few opcodes before failing ("import os" reads as INST importing "mport os"): not a pickle, no error
+    (tmp_path / "modeling.py").write_bytes(b"import os\nimport sys\n\nclass Model:\n    pass\n")
+    (tmp_path / "LICENSE").write_bytes(b"copyright 2024 someone\nall rights reserved\n")
+    result = scan_directory_path(str(tmp_path))
+    compare_scan_results(result, ScanResult([], 2, 0, 0))
+    # ... while a protocol 0 pickle cut short still is: the unpickler runs what comes before the point where it fails
+    (tmp_path / "weights").write_bytes(pickle.dumps(Malicious1(), protocol=0)[:-1] + b"\xff")
+    result = scan_directory_path(str(tmp_path))
+    assert _finds_eval(result) and _error_kinds(result) == [ScanErrorKind.PARSE]
 
 
 def test_main():
@@ -1985,9 +2054,9 @@ def test_scan_directory_exclude_wins_over_include():
 def test_scan_directory_exclude_dir():
     """--exclude-dir prevents traversal into matching directories."""
     # Scanning the parent tests/ directory but excluding 'data2'
-    sf = ScanFilter(exclude_dir=[re.compile(r"data2")])
+    sf = ScanFilter(exclude_dir=[re.compile(r"data2"), re.compile(r"__pycache__")])
     sr = scan_directory_path(f"{_root_path}/", scan_filter=sf)
-    # Should still find files in data/ but none from data2/
+    # Should still find files in data/ but none from data2/ (every file is scanned by content, so __pycache__ is excluded too)
     assert sr.scanned_files > 0
     # Compare with an include_dir that only allows data/
     sf2 = ScanFilter(include_dir=[re.compile(r"/data$")])

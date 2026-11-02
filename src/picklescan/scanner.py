@@ -2,6 +2,7 @@ import ast
 import bz2
 from dataclasses import dataclass, field
 from enum import Enum
+import errno
 import gzip
 import http.client
 import io
@@ -12,7 +13,7 @@ import os
 import pickletools
 import re
 import tarfile
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, TemporaryFile
 from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
@@ -474,29 +475,8 @@ _pickle_magic_bytes = {
 }
 _numpy_magic_bytes = b"\x93NUMPY"
 _7z_magic_bytes = b"7z\xbc\xaf\x27\x1c"
-# Extensions scanned without looking at the content first
-_scanned_file_extensions = (
-    _zip_file_extensions | _pickle_file_extensions | _pytorch_file_extensions | _numpy_file_extensions | _compressed_file_extensions
-)
 # Bytes read from the start of a file to tell its format (a tar header is 512 bytes)
 _head_size = 512
-# Number of leading bytes read to decide whether a file is worth scanning
-_probe_size = 16
-
-
-def _should_scan(head: bytes, file_ext: Optional[str]) -> bool:
-    """Decides from a file's extension and first bytes whether a directory or Hugging Face scan should scan it.
-
-    Files with a known extension are always scanned. Others are scanned when their content looks like a format we can scan.
-    Protocol 0 and 1 pickles have no magic bytes, so they are only picked up through their extension.
-    """
-    if file_ext in _scanned_file_extensions:
-        return True
-    if head.startswith((_numpy_magic_bytes, _7z_magic_bytes) + _zip_magic_bytes) or _compression_of(head) is not None:
-        return True
-    # Protocol 2+ pickles start with PROTO. Also require a valid opcode right after it: other binary formats can start with the
-    # same two bytes (a safetensors header length of 640 does), and for Hugging Face scans a false positive means a full download.
-    return head[:2] in _pickle_magic_bytes and len(head) > 2 and chr(head[2]) in pickletools.code2op
 
 
 def _is_7z_file(f: IO[bytes]) -> bool:
@@ -527,33 +507,191 @@ def _is_legacy_pytorch(data: IO[bytes]) -> bool:
 _max_redirects = 10
 
 
-def _http_get(url, max_bytes: Optional[int] = None, _redirects: int = 0) -> bytes:
-    """GET url; with max_bytes, only its first max_bytes bytes (a Range request, and a bounded read if the server ignores it)."""
-    _log.debug(f"Request: GET {url}" + ("" if max_bytes is None else f" (first {max_bytes} bytes)"))
+class _HTTPError(OSError):
+    pass
 
+
+def _http_open(url: str, byte_range: Optional[Tuple[int, int]] = None, connection=None, _redirects: int = 0):
+    """Sends GET url, following redirections: (connection, response, final URL). The caller reads the response, and closes the
+    connection or reuses it for the same host (connection: one to reuse, when it is for the host of url)."""
+    _log.debug(f"Request: GET {url}" + ("" if byte_range is None else f" bytes {byte_range[0]}-{byte_range[1]}"))
     parsed_url = urllib.parse.urlparse(url)
-    path_and_query = parsed_url.path + ("?" + parsed_url.query if len(parsed_url.query) > 0 else "")
-    headers = {} if max_bytes is None else {"Range": f"bytes=0-{max_bytes - 1}"}
-
-    connection = http.client.HTTPConnection if parsed_url.scheme == "http" else http.client.HTTPSConnection
-    conn = connection(parsed_url.netloc)
+    if parsed_url.scheme not in ("http", "https"):
+        raise _HTTPError(f"cannot GET {url}: only http and https URLs are supported")
+    path_and_query = (parsed_url.path or "/") + ("?" + parsed_url.query if len(parsed_url.query) > 0 else "")
+    headers = {} if byte_range is None else {"Range": f"bytes={byte_range[0]}-{byte_range[1]}"}
+    if connection is None:
+        connection = (http.client.HTTPConnection if parsed_url.scheme == "http" else http.client.HTTPSConnection)(parsed_url.netloc)
     try:
-        conn.request("GET", path_and_query, headers=headers)
-        response = conn.getresponse()
+        connection.request("GET", path_and_query, headers=headers)
+        response = connection.getresponse()
         _log.debug(f"Response: status code {response.status} reason {response.reason}")
         if response.status in (301, 302, 303, 307, 308):  # Follow redirections
-            location = response.headers.get("Location")
+            location = response.getheader("Location")
+            response.read()
+            connection.close()
             if not location or _redirects >= _max_redirects:
-                raise RuntimeError(f"HTTP {response.status} calling GET {url}: " + ("too many redirections" if location else "no Location"))
+                raise _HTTPError(f"HTTP {response.status} calling GET {url}: " + ("too many redirections" if location else "no Location"))
             # Hugging Face redirects small files to a relative location (/api/resolve-cache/...)
-            return _http_get(urllib.parse.urljoin(url, location), max_bytes, _redirects + 1)
-        elif response.status >= 400:
-            raise RuntimeError(
-                f"HTTP {response.status} ({response.reason}) calling GET {parsed_url.scheme}://{parsed_url.netloc}{path_and_query}"
-            )
-        return response.read() if max_bytes is None else response.read(max_bytes)
+            return _http_open(urllib.parse.urljoin(url, location), byte_range, None, _redirects + 1)
+        if response.status >= 400 and not (response.status == 416 and byte_range is not None):
+            raise _HTTPError(f"HTTP {response.status} ({response.reason}) calling GET {url}")
+        return connection, response, url
+    except BaseException:
+        connection.close()
+        raise
+
+
+def _http_get(url) -> bytes:
+    connection, response, _ = _http_open(url)
+    try:
+        return response.read()
     finally:
-        conn.close()
+        connection.close()
+
+
+class _RemoteFile(io.RawIOBase):
+    """A file over HTTP(S), downloaded with Range requests as a scan reads it: what a scan skips (tensor data, archive members it
+    does not open...) is never downloaded. Downloaded data is kept in a temporary file, not in memory. When the server does not
+    serve ranges, the whole file is downloaded at once."""
+
+    _picklescan_cheap_seek = True
+    _block_size = 1 << 16
+    _max_readahead = 64 << 20
+
+    def __init__(self, url: str):
+        self._cache = TemporaryFile()
+        self._fetched = set()  # indices of the blocks in the cache
+        self._pos = 0
+        self._consumed = 0  # end of the last read
+        self._readahead = 1
+        self._next_block = None  # block following the last ones fetched
+        self._connection = None
+        try:
+            self._connection, response, self._url = _http_open(url, (0, self._block_size - 1))
+            total = None
+            if response.status == 206:
+                start, end, total = self._content_range(response)
+                if start != 0:
+                    raise _HTTPError(f"{self._url}: got bytes {start}-{end} instead of the start of the file")
+            if response.status == 416:
+                total = self._content_range(response, unsatisfied=True)[2]
+                response.read()
+                if total not in (None, 0):
+                    raise _HTTPError(f"{self._url}: cannot read the start of a file of {total} bytes")
+                self._size = 0
+            elif total is None:
+                # Ranges not served (or the size not told): the whole file
+                self._size = self._download(response)
+                self._fetched.update(range(0, -(-self._size // self._block_size)))
+            else:
+                self._size = total
+                self._store(0, response.read(), end - start + 1)
+        except BaseException:
+            self.close()
+            raise
+
+    def _content_range(self, response, unsatisfied: bool = False) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+        content_range = response.getheader("Content-Range") or ""
+        match = re.fullmatch(r"bytes (?:(\d+)-(\d+)|\*)/(\d+|\*)", content_range.strip())
+        if match is None or (match.group(1) is None) != unsatisfied:
+            if unsatisfied and not content_range:
+                return None, None, None
+            raise _HTTPError(f"{self._url}: invalid Content-Range {content_range!r}")
+        start, end, total = (None if g in (None, "*") else int(g) for g in match.groups())
+        if start is not None and (end < start or (total is not None and end >= total)):
+            raise _HTTPError(f"{self._url}: invalid Content-Range {content_range!r}")
+        return start, end, total
+
+    def _download(self, response) -> int:
+        size = 0
+        while True:
+            chunk = response.read(1 << 20)
+            if not chunk:
+                return size
+            self._cache.write(chunk)
+            size += len(chunk)
+
+    def _store(self, offset: int, data: bytes, expected: int):
+        if len(data) != expected:
+            raise _HTTPError(f"{self._url}: got {len(data)} bytes instead of {expected} at offset {offset}")
+        self._cache.seek(offset)
+        self._cache.write(data)
+        end = offset + len(data)
+        # Whole blocks only, and the last one at the end of the file
+        last = -(-end // self._block_size) if end >= self._size else end // self._block_size
+        self._fetched.update(range(offset // self._block_size, last))
+
+    def _request(self, start: int, end: int):
+        for attempt in (0, 1):
+            try:
+                self._connection, response, _ = _http_open(self._url, (start, end), self._connection)
+                break
+            except (http.client.RemoteDisconnected, ConnectionError, http.client.CannotSendRequest):
+                self._connection = None  # the server closed the connection kept open: reconnect once
+                if attempt:
+                    raise
+        if response.status != 206:
+            response.read()
+            raise _HTTPError(f"{self._url}: HTTP {response.status} to a Range request after a 206")
+        got_start, got_end, total = self._content_range(response)
+        if (got_start, got_end) != (start, end) or total not in (None, self._size):
+            raise _HTTPError(f"{self._url}: got bytes {got_start}-{got_end}/{total} instead of {start}-{end}/{self._size}")
+        self._store(start, response.read(), end - start + 1)
+
+    def _ensure(self, start: int, end: int):
+        first, last = start // self._block_size, (end - 1) // self._block_size
+        for block in range(first, last + 1):
+            if block in self._fetched:
+                continue
+            # Reading on from where the last request ended, after reading what it fetched: fetch more and more at once
+            sequential = block == self._next_block and self._consumed >= block * self._block_size
+            self._readahead = min(self._readahead * 2, self._max_readahead // self._block_size) if sequential else 1
+            stop = block
+            while stop <= max(last, block + self._readahead - 1) and stop not in self._fetched and stop * self._block_size < self._size:
+                stop += 1
+            self._request(block * self._block_size, min(stop * self._block_size, self._size) - 1)
+            self._next_block = stop
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def readinto(self, b) -> int:
+        size = max(0, min(len(b), self._size - self._pos))
+        if size == 0:
+            return 0
+        self._ensure(self._pos, self._pos + size)
+        self._cache.seek(self._pos)
+        data = self._cache.read(size)
+        b[: len(data)] = data
+        self._pos += len(data)
+        self._consumed = self._pos
+        return len(data)
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        position = {io.SEEK_SET: 0, io.SEEK_CUR: self._pos, io.SEEK_END: self._size}[whence] + offset
+        if position < 0:
+            raise OSError(errno.EINVAL, f"negative seek position {position}")  # as for files: zipfile relies on it
+        self._pos = position
+        return self._pos
+
+    def tell(self) -> int:
+        return self._pos
+
+    def close(self):
+        if not self.closed:
+            self._cache.close()
+            if self._connection is not None:
+                self._connection.close()
+        super().close()
+
+
+def _scan_remote_file(url: str, file_ext: Optional[str], strict: bool, limits: Optional[ScanLimits]) -> ScanResult:
+    with _RemoteFile(url) as raw, io.BufferedReader(raw, 1 << 16) as file:
+        return scan_bytes(file, url, file_ext, strict=strict, limits=limits)
 
 
 class _OpcodeError(ValueError):
@@ -1543,13 +1681,23 @@ def _build_scan_result_from_raw_globals(
     return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, scan_err, suspicious_count)
 
 
-def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=False) -> ScanResult:
+def _importable_name(name: str) -> bool:
+    return all(part.isidentifier() for part in name.split("."))
+
+
+def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=False, _without_magic=False) -> ScanResult:
     """Disassemble a Pickle stream and report issues"""
     _log.debug(f"scan_pickle_bytes({file_id})")
 
     try:
         raw_globals = _list_globals(data, multiple_pickles)
     except GenOpsError as e:
+        if e.globals is not None and _without_magic:
+            # Content without pickle magic bytes that fails to parse is most likely not a pickle at all: text such as Python
+            # source parses as a few opcodes ("import os" reads as INST importing "mport os") before failing. Imports with names
+            # the import system cannot resolve are dropped; unknown operands and frame violations are kept.
+            kept = {g for g in e.globals if g == _frame_violation_global or (_importable_name(g[0]) and _importable_name(g[1]))}
+            e.globals = kept or None
         if e.globals is not None:
             # Found some globals before error - could be a malicious partial pickle
             _log.error(f"{_location(file_id).describe()}: error parsing pickle: {e}", exc_info=_log.isEnabledFor(logging.DEBUG))
@@ -2040,7 +2188,7 @@ def _walk_format(data, info: FileInfo, file_ext, ctx: _ScanContext, depth: int, 
             # corruption, so what could be read is scanned.
             content, read_error = _read_until_error(data)
             data = io.BytesIO(content)
-        ctx.result.merge(scan_pickle_bytes(data, file_id, strict=ctx.strict))
+        ctx.result.merge(scan_pickle_bytes(data, file_id, strict=ctx.strict, _without_magic=fmt is FileFormat.UNKNOWN))
         if read_error is not None:
             message = f"cannot read past byte {data.getbuffer().nbytes}: {read_error}"
             ctx.result.merge(_error_result(file_id, ScanErrorKind.ARCHIVE, message, 0))
@@ -2279,17 +2427,13 @@ def scan_huggingface_model(repo_id, strict=False, limits: Optional[ScanLimits] =
     model = json.loads(_http_get(f"https://huggingface.co/api/models/{repo_id}").decode("utf-8"))
     file_names = [file_name for file_name in (sibling.get("rfilename") for sibling in model["siblings"]) if file_name is not None]
 
-    # Scan model files
+    # Scan model files. Every file is scanned by content (protocol 0 and 1 pickles have no magic bytes, and extensions can lie): a
+    # file that is not a pickle fails to parse within its first bytes, so only those are downloaded
     scan_result = ScanResult([])
     for file_name in file_names:
-        file_ext = os.path.splitext(file_name)[1]
-        url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
-        # Only the first bytes are fetched to decide, so that large non-pickle files (safetensors, GGUF...) are never downloaded
-        if file_ext not in _scanned_file_extensions and not _should_scan(_http_get(url, max_bytes=_probe_size), file_ext):
-            _log.debug("Skipping file %s in model %s: not a format we scan", file_name, repo_id)
-            continue
+        url = f"https://huggingface.co/{repo_id}/resolve/main/{urllib.parse.quote(file_name)}"
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
-        scan_result.merge(_isolated(lambda: scan_bytes(io.BytesIO(_http_get(url)), url, file_ext, strict=strict, limits=limits), url))
+        scan_result.merge(_isolated(lambda: _scan_remote_file(url, os.path.splitext(file_name)[1], strict, limits), url))
 
     return scan_result
 
@@ -2348,12 +2492,10 @@ def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None, strict=F
                 _log.debug("Skipping %s: not a regular file", file_path)
                 continue
 
+            # Every file is scanned by content: protocol 0 and 1 pickles have no magic bytes, and extensions can lie. Files that are
+            # not pickles fail to parse within their first bytes.
             def scan_one(file_path=file_path, file_ext=file_ext) -> ScanResult:
                 with open(file_path, "rb") as file:
-                    if not _should_scan(file.read(_probe_size), file_ext):
-                        _log.debug("Skipping file %s: not a format we scan", file_path)
-                        return ScanResult([])
-                    file.seek(0)
                     _log.debug("Scanning file %s", file_path)
                     return scan_bytes(file, file_path, file_ext, strict=strict, limits=limits)
 
@@ -2373,7 +2515,7 @@ def scan_file_path(path, strict=False, limits: Optional[ScanLimits] = None) -> S
 def scan_url(url, strict=False, limits: Optional[ScanLimits] = None) -> ScanResult:
     _log.debug(f"scan_url({url})")
 
-    return scan_bytes(io.BytesIO(_http_get(url)), url, strict=strict, limits=limits)
+    return _scan_remote_file(url, os.path.splitext(urllib.parse.urlparse(url).path)[1] or None, strict, limits)
 
 
 def detect_file(data: IO[bytes], file_id: str = "", file_ext: Optional[str] = None, limits: Optional[ScanLimits] = None) -> FileInfo:
