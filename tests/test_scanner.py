@@ -1,11 +1,16 @@
 import http.client
 from collections import OrderedDict
 import importlib
+import bz2
+import gzip
 import io
+import lzma
+import tarfile
 import json
 import os
 import pickle
 import re
+import struct
 import sys
 import zlib
 from typing import Union
@@ -20,7 +25,9 @@ from picklescan.scanner import (
     Global,
     SafetyLevel,
     ScanFilter,
+    FileFormat,
     ScanErrorKind,
+    ScanLimits,
     ScanResult,
     _http_get,
     _list_globals,
@@ -35,6 +42,7 @@ from picklescan.scanner import (
     scan_huggingface_model,
     scan_numpy,
     scan_pytorch,
+    detect_file,
 )
 from picklescan.relaxed_zipfile import RelaxedZipFile
 from picklescan.torch import MAGIC_NUMBER
@@ -1149,14 +1157,14 @@ def test_scan_file_path_legacy_pytorch_magic_in_pickle_file(tmp_path):
     compare_scan_results(scan_file_path(str(target)), ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1))
 
 
-def _nested_zip(depth: int) -> bytes:
-    """A malicious pickle wrapped in `depth` zips, each inner zip stored as an `.npy` member to go through scan_numpy."""
+def _nested_zip(depth: int, member_name: str = "nested.zip") -> bytes:
+    """A malicious pickle wrapped in `depth` zips."""
     data = b""
     for _ in range(depth):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as zip:
             if data:
-                zip.writestr("nested.npy", data)
+                zip.writestr(member_name, data)
             else:
                 zip.writestr("payload.pkl", pickle.dumps(Malicious1()))
         data = buffer.getvalue()
@@ -1164,14 +1172,33 @@ def _nested_zip(depth: int) -> bytes:
 
 
 def test_scan_nested_zip_archives():
+    eval_found = [Global("builtins", "eval", SafetyLevel.Dangerous)]
+    # The members of an archive are scanned, archives among them are reported as skipped rather than opened
+    result = scan_bytes(io.BytesIO(_nested_zip(1)), "nested.zip", ".zip")
+    compare_scan_results(result, ScanResult(eval_found, 1, 1, 1))
+    result = scan_bytes(io.BytesIO(_nested_zip(3)), "nested.zip", ".zip")
+    compare_scan_results(result, ScanResult([], 0, 0, 0))
+    assert [s.file_id for s in result.skipped] == ["nested.zip:nested.zip"]
+    # A model file (here an .npz) in an archive is opened one level deeper than other archives, model files in model files too
+    result = scan_bytes(io.BytesIO(_nested_zip(50, member_name="nested.npy")), "nested.npz", ".npz")
+    compare_scan_results(result, ScanResult([], 0, 0, 0))
+    assert [s.file_id for s in result.skipped] == ["nested.npz:nested.npy:nested.npy"]
+    # Opening more levels is a setting
     compare_scan_results(
-        scan_bytes(io.BytesIO(_nested_zip(3)), "nested.zip", ".zip"),
-        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1),
+        scan_bytes(io.BytesIO(_nested_zip(3)), "nested.zip", ".zip", limits=ScanLimits(max_archive_depth=3)),
+        ScanResult(eval_found, 1, 1, 1),
     )
-    # Past the depth cap the scan stops and reports an error instead of recursing until RecursionError is silently swallowed
-    result = scan_bytes(io.BytesIO(_nested_zip(50)), "nested.zip", ".zip")
-    assert result.globals == []
-    assert result.scan_err is True
+    # Many directory entries pointing at the same member are scanned once (fan-out)
+    duplicated = _duplicate_zip_entries(_zip_bytes([("data.pkl", pickle.dumps(Malicious1()))]), 1000)
+    compare_scan_results(scan_bytes(io.BytesIO(duplicated), "duplicated.zip", ".zip"), ScanResult(eval_found, 1, 1, 1))
+
+
+def _duplicate_zip_entries(zip_data: bytes, count: int) -> bytes:
+    end = zip_data.rindex(b"PK\x05\x06")
+    _, _, _, _, entries, cd_size, cd_offset, _ = struct.unpack("<4sHHHHIIH", zip_data[end : end + 22])
+    assert entries == 1
+    cd = zip_data[cd_offset : cd_offset + cd_size] * count
+    return zip_data[:cd_offset] + cd + struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, count, count, len(cd), cd_offset, 0)
 
 
 def _nested_7z(depth: int) -> bytes:
@@ -1187,13 +1214,14 @@ def _nested_7z(depth: int) -> bytes:
 
 
 def test_scan_nested_7z_archives():
+    eval_found = [Global("builtins", "eval", SafetyLevel.Dangerous)]
+    compare_scan_results(scan_bytes(io.BytesIO(_nested_7z(1)), "nested.7z", ".7z"), ScanResult(eval_found, 1, 1, 1))
+    result = scan_bytes(io.BytesIO(_nested_7z(3)), "nested.7z", ".7z")
+    compare_scan_results(result, ScanResult([], 0, 0, 0))
+    assert [s.file_id for s in result.skipped] == ["nested.7z:nested.pkl"]  # findings are reported under the archive's name
     compare_scan_results(
-        scan_bytes(io.BytesIO(_nested_7z(3)), "nested.7z", ".7z"),
-        ScanResult([Global("builtins", "eval", SafetyLevel.Dangerous)], 1, 1, 1),
+        scan_bytes(io.BytesIO(_nested_7z(3)), "nested.7z", ".7z", limits=ScanLimits(max_archive_depth=3)), ScanResult(eval_found, 1, 1, 1)
     )
-    result = scan_bytes(io.BytesIO(_nested_7z(12)), "nested.7z", ".7z")
-    assert result.globals == []
-    assert result.scan_err is True
 
 
 def _zip_bytes(members, compression=zipfile.ZIP_STORED) -> bytes:
@@ -1317,6 +1345,189 @@ def test_scan_directory_path_isolates_failures(tmp_path, monkeypatch):
     assert result.errors[0].file_id.endswith("b.pkl") and "boom" in result.errors[0].message
 
 
+_eval_found = Global("builtins", "eval", SafetyLevel.Dangerous)
+
+
+def _finds_eval(result: ScanResult) -> bool:
+    return result.infected_files == 1 and any(g.name == "eval" and g.safety == SafetyLevel.Dangerous for g in result.globals)
+
+
+def test_compressed_pickles_are_decompressed(tmp_path):
+    # joblib.load decompresses by magic bytes
+    for compress in ("zlib", "gzip", "bz2", "lzma", "xz"):
+        result = scan_file_path(f"{_root_path}/data2/joblib_malicious_{compress}.joblib")
+        assert _finds_eval(result) and not result.scan_err, (compress, result)
+    # pandas.read_pickle decompresses by extension
+    for ext, opener in ((".pkl.gz", gzip.open), (".pkl.bz2", bz2.open), (".pkl.xz", lzma.open)):
+        path = tmp_path / f"model{ext}"
+        with opener(path, "wb") as f:
+            f.write(pickle.dumps(Malicious1()))
+        result = scan_file_path(str(path))
+        assert _finds_eval(result) and not result.scan_err, (ext, result)
+
+
+def test_compressed_headers_as_loaders_read_them(tmp_path):
+    payload = pickle.dumps(Malicious1())
+    # gzip.GzipFile ignores reserved header flags, which zlib rejects
+    data = bytearray(gzip.compress(payload))
+    data[3] |= 0xE0
+    assert _finds_eval(scan_bytes(io.BytesIO(bytes(data)), "model.pkl.gz"))
+    # joblib parses the size in its old zlib header with int(), which accepts spaces
+    data = b"ZF" + f"{len(payload):#x}".rjust(19).encode() + zlib.compress(payload)
+    assert detect_file(io.BytesIO(data)).compression == "zfile"
+    assert _finds_eval(scan_bytes(io.BytesIO(data), "model.joblib"))
+    # lzma.LZMAFile (pandas, .xz files) reads lzma_alone streams with any valid properties
+    compressor = lzma.LZMACompressor(lzma.FORMAT_ALONE, filters=[{"id": lzma.FILTER_LZMA1, "lc": 4, "lp": 0, "pb": 2}])
+    data = compressor.compress(payload) + compressor.flush()
+    assert data[:1] != b"\x5d"
+    assert _finds_eval(scan_bytes(io.BytesIO(data), "model.pkl.xz", ".xz"))
+    # zstd streams can start with a skippable frame
+    skippable = b"\x50\x2a\x4d\x18" + (4).to_bytes(4, "little") + b"skip"
+    assert detect_file(io.BytesIO(skippable + b"\x28\xb5\x2f\xfd" + bytes(64))).compression == "zstd"
+
+
+def test_truncated_compressed_pickles():
+    # What precedes a corruption is decompressed, and loaders run it
+    for compress in (gzip.compress, bz2.compress, lzma.compress):
+        result = scan_bytes(io.BytesIO(compress(pickle.dumps(Malicious1()))[:-8]), "model.pkl.gz")
+        assert _finds_eval(result) and _error_kinds(result) == [ScanErrorKind.ARCHIVE], (compress, result)
+
+
+def test_decompression_through_seeks_is_counted():
+    ctx = scanner_module._ScanContext(limits=ScanLimits(max_decompressed_size=1 << 20))
+    with scanner_module._counted(gzip.GzipFile(fileobj=io.BytesIO(gzip.compress(bytes(4 << 20)))), ctx) as file:
+        with pytest.raises(scanner_module._LimitExceeded):
+            file.seek(0, io.SEEK_END)
+    ctx = scanner_module._ScanContext(limits=ScanLimits(max_decompressed_size=1 << 20))
+    with scanner_module._counted(gzip.GzipFile(fileobj=io.BytesIO(gzip.compress(bytes(4 << 20)))), ctx) as file:
+        with pytest.raises(scanner_module._LimitExceeded):
+            file.seek(2 << 20)
+
+
+def test_compression_without_decompressor(monkeypatch):
+    monkeypatch.setitem(sys.modules, "compression.zstd", None)
+    monkeypatch.setitem(sys.modules, "zstandard", None)
+    result = scan_bytes(io.BytesIO(b"\x28\xb5\x2f\xfd" + b"\x00" * 64), "model.pkl.zst")
+    assert _error_kinds(result) == [ScanErrorKind.MISSING_DEPENDENCY]
+
+
+def _tar_bytes(members, mode="w") -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode=mode) as tar:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def test_scan_tar_archives():
+    members = [("model/weights.bin", b"\x00" * 1000), ("model/model.pkl", pickle.dumps(Malicious1())), ("README.md", b"# model")]
+    for mode, name in (("w", "model.tar"), ("w:gz", "model.tar.gz"), ("w:bz2", "model.tar.bz2"), ("w:xz", "model.tar.xz")):
+        result = scan_bytes(io.BytesIO(_tar_bytes(members, mode)), name)
+        compare_scan_results(result, ScanResult([_eval_found], 3, 1, 1))
+        assert not result.scan_err
+    # a tar file starts with the name of its first member, which pickle.load reads as opcodes
+    polyglot = _tar_bytes([(pickle.dumps(Malicious1(), protocol=0).decode("latin-1")[:99], b"")])
+    assert _finds_eval(scan_bytes(io.BytesIO(polyglot), "polyglot.tar"))
+
+
+def test_scan_tar_polyglots():
+    # A tar archive whose first member name starts like a zip: zip readers fail, tarfile (torch.load, pandas) reads the members
+    data = _tar_bytes([("PK\x03\x04" + "x" * 20, b""), ("model.pkl", pickle.dumps(Malicious1()))])
+    result = scan_bytes(io.BytesIO(data), "polyglot.tar")
+    assert _finds_eval(result)
+
+
+def test_archive_members_are_all_counted():
+    limits = ScanLimits(max_archive_members=5)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for i in range(10):
+            info = tarfile.TarInfo(f"dir{i}")
+            info.type = tarfile.DIRTYPE
+            tar.addfile(info)
+    assert _error_kinds(scan_bytes(io.BytesIO(buffer.getvalue()), "dirs.tar", limits=limits)) == [ScanErrorKind.LIMIT]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip:
+        for i in range(10):
+            zip.writestr(f"dir{i}/", b"")
+    assert _error_kinds(scan_bytes(io.BytesIO(buffer.getvalue()), "dirs.zip", limits=limits)) == [ScanErrorKind.LIMIT]
+
+
+def test_model_zip_members():
+    payload = pickle.dumps(Malicious1())
+    members = [
+        ("archive/data.pkl", pickle.dumps(OrderedDict())),
+        ("archive/data/0", payload),  # raw tensor data: torch.load never unpickles it
+        ("archive/code/model.py", b"class Model:\n    pass\n"),  # text: neither
+        ("archive/extra/payload.pkl.gz", gzip.compress(payload)),  # a zip with a data.pkl is not only read by torch.load
+    ]
+    result = scan_bytes(io.BytesIO(_zip_bytes(members)), "model.pt")
+    compare_scan_results(result, ScanResult([Global("collections", "OrderedDict", SafetyLevel.Innocuous), _eval_found], 2, 1, 1))
+    assert not result.scan_err
+
+
+def test_scan_limits():
+    # decompression budget (data is only decompressed as far as it is parsed: the bomb holds a pickle with a large argument)
+    bomb = gzip.compress(pickle.dumps(b"\x00" * (20 << 20)))
+    assert len(bomb) < 100_000
+    result = scan_bytes(io.BytesIO(bomb), "bomb.gz", limits=ScanLimits(max_decompressed_size=1 << 20))
+    assert _error_kinds(result) == [ScanErrorKind.LIMIT]
+    # compressed streams inside compressed streams
+    layered = gzip.compress(gzip.compress(gzip.compress(pickle.dumps(Malicious1()))))
+    result = scan_bytes(io.BytesIO(layered), "layered.gz")
+    assert _error_kinds(result) == [ScanErrorKind.LIMIT]
+    assert _finds_eval(scan_bytes(io.BytesIO(layered), "layered.gz", limits=ScanLimits(max_compression_layers=3)))
+    # number of archive members
+    many = _zip_bytes([(f"{i}.txt", b"x") for i in range(20)])
+    result = scan_bytes(io.BytesIO(many), "many.zip", limits=ScanLimits(max_archive_members=10))
+    assert _error_kinds(result) == [ScanErrorKind.LIMIT]
+
+
+def test_scan_numpy_without_numpy(monkeypatch):
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    result = scan_file_path(f"{_root_path}/data2/object_array.npy")
+    assert {(g.module, g.name) for g in result.globals} == {
+        ("numpy.core.multiarray", "_reconstruct"),
+        ("numpy", "ndarray"),
+        ("numpy", "dtype"),
+    }
+    compare_scan_results(scan_file_path(f"{_root_path}/data2/int_array.npy"), ScanResult([], 1))
+    compare_scan_results(
+        scan_file_path(f"{_root_path}/data2/object_arrays_compressed.npz"), scan_file_path(f"{_root_path}/data2/object_arrays.npz")
+    )
+
+
+def test_scan_numpy_unclear_dtype_is_scanned():
+    # a dtype description we cannot vouch for is treated as possibly holding objects: the data after the header is scanned
+    header = b"{'descr': 'weird', 'fortran_order': False, 'shape': (1,), }"
+    header += b" " * (63 - len(header) % 64) + b"\n"
+    data = b"\x93NUMPY\x01\x00" + len(header).to_bytes(2, "little") + header + pickle.dumps(Malicious1())
+    assert _finds_eval(scan_bytes(io.BytesIO(data), "weird.npy"))
+
+
+def test_detect_file():
+    detected = detect_file(io.BytesIO(pickle.dumps({"a": 1}, protocol=4)), "x.pkl")
+    assert (detected.format, detected.pickle_protocol) == (FileFormat.PICKLE, 4)
+    detected = detect_file(io.BytesIO(pickle.dumps({"a": 1}, protocol=0)), "x")
+    assert (detected.format, detected.pickle_protocol) == (FileFormat.PICKLE, 0)
+    assert detect_file(io.BytesIO(b"# not a pickle"), "README.md").format == FileFormat.UNKNOWN
+    with open(f"{_root_path}/data/pytorch_model.bin", "rb") as f:
+        assert detect_file(f, "pytorch_model.bin").format == FileFormat.PYTORCH_LEGACY
+    with open(f"{_root_path}/data/new_pytorch_model.bin", "rb") as f:
+        detected = detect_file(f, "new_pytorch_model.bin")
+    assert detected.format == FileFormat.PYTORCH_ZIP and [m.format for m in detected.members] == [FileFormat.PICKLE]
+    with open(f"{_root_path}/data2/object_arrays.npz", "rb") as f:
+        assert [m.format for m in detect_file(f, "a.npz").members] == [FileFormat.NUMPY, FileFormat.NUMPY]
+    # a .tar.gz: compressed stream > tar archive > members
+    detected = detect_file(io.BytesIO(_tar_bytes([("m.pkl", pickle.dumps(1)), ("inner.zip", _zip_bytes([("x", b"")]))], "w:gz")), "a.tgz")
+    assert (detected.format, detected.compression) == (FileFormat.COMPRESSED, "gzip")
+    tar = detected.members[0]
+    assert tar.format == FileFormat.TAR and [m.format for m in tar.members] == [FileFormat.PICKLE, FileFormat.ZIP]
+    assert "nested" in tar.members[1].note and tar.members[1].members == []
+
+
 def test_scan_directory_path():
     sr = ScanResult(
         globals=[
@@ -1379,7 +1590,7 @@ def test_scan_directory_path():
             Global("__builtin__", "eval", SafetyLevel.Dangerous),
             Global("posix", "system", SafetyLevel.Dangerous),
         ],
-        scanned_files=45,
+        scanned_files=46,  # the member of benign_password_protected.zip is scanned (encrypted, it is not a pickle)
         issues_count=45,
         infected_files=38,
         # scan_err=True because some files (broken_model.pkl, malicious-invalid-bytes.pkl) have partial parsing errors

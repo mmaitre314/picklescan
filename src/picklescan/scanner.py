@@ -1,13 +1,17 @@
+import ast
+import bz2
 from dataclasses import dataclass, field
 from enum import Enum
+import gzip
 import http.client
 import io
 import json
 import logging
+import lzma
 import os
 import pickletools
 import re
-from tarfile import TarError
+import tarfile
 from tempfile import TemporaryDirectory
 from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
@@ -20,7 +24,6 @@ from .torch import (
     InvalidMagicError,
     _is_zipfile,
     MAGIC_NUMBER,
-    _should_read_directly,
 )
 
 
@@ -94,6 +97,84 @@ class ScanResult:
         self.suspicious_count += sr.suspicious_count
         self.errors.extend(sr.errors)
         self.skipped.extend(sr.skipped)
+
+
+@dataclass
+class ScanLimits:
+    """Bounds on the work a scan does, so that a small crafted input cannot make it run nearly forever or exhaust memory or disk.
+
+    - ``max_archive_depth``: archive levels opened. With the default of 1, the members of an archive are scanned, and archives found
+      among them are reported in ``ScanResult.skipped`` instead of being opened. Model formats built on zip (PyTorch, .npz) and
+      compressed files do not count as a level.
+    - ``max_archive_members``: archive members scanned, over the whole scan.
+    - ``max_decompressed_size``: bytes decompressed, over the whole scan (archive members, compressed files).
+    - ``max_compression_layers``: compressed streams nested in each other (a .tar.gz has one).
+    - ``max_npy_header_size``: size of a .npy header.
+    """
+
+    max_archive_depth: int = 1
+    max_archive_members: int = 100_000
+    max_decompressed_size: int = 32 << 30
+    max_compression_layers: int = 2
+    max_npy_header_size: int = 1 << 20
+
+
+class FileFormat(Enum):
+    """File formats told apart by content. Extensions are only used to break ties (see detect_file)."""
+
+    PICKLE = "pickle"
+    PYTORCH_LEGACY = "pytorch_legacy"  # torch.save(_use_new_zipfile_serialization=False): a sequence of pickles
+    PYTORCH_ZIP = "pytorch_zip"  # torch.save: a zip archive holding a data.pkl pickle
+    NUMPY = "numpy"  # .npy
+    NUMPY_ZIP = "numpy_zip"  # .npz: a zip archive of .npy files
+    ZIP = "zip"
+    SEVEN_ZIP = "7z"
+    TAR = "tar"
+    COMPRESSED = "compressed"  # a single compressed stream (gzip, bz2, xz, lzma, zlib, zstd, lz4), see FileInfo.compression
+    UNKNOWN = "unknown"  # none of the above. When scanning, still parsed as a pickle: protocol 0 and 1 pickles have no magic bytes
+
+
+@dataclass
+class FileInfo:
+    """What a file contains."""
+
+    file_id: str
+    format: FileFormat
+    compression: Optional[str] = None  # for COMPRESSED
+    pickle_protocol: Optional[int] = None  # for PICKLE and PYTORCH_LEGACY, when known
+    trailing_zip: bool = False  # a zip archive follows other content: zip readers find it from the end of the file
+    members: List["FileInfo"] = field(default_factory=list)  # archive members, or the content of a compressed file
+    note: Optional[str] = None  # why the content was not (fully) inspected
+
+
+class _LimitExceeded(Exception):
+    pass
+
+
+class _MissingDependency(Exception):
+    pass
+
+
+class _ScanContext:
+    """State shared by everything one scan opens: settings, limits, the work done so far and the results."""
+
+    def __init__(self, strict: bool = False, limits: Optional[ScanLimits] = None, scan: bool = True):
+        self.strict = strict
+        self.limits = limits or ScanLimits()
+        self.scan = scan  # False: only detect formats (detect_file)
+        self.result = ScanResult([])
+        self.decompressed = 0
+        self.members = 0
+
+    def count_decompressed(self, size: int):
+        self.decompressed += size
+        if self.decompressed > self.limits.max_decompressed_size:
+            raise _LimitExceeded(f"decompressed more than {self.limits.max_decompressed_size} bytes (ScanLimits.max_decompressed_size)")
+
+    def count_member(self):
+        self.members += 1
+        if self.members > self.limits.max_archive_members:
+            raise _LimitExceeded(f"more than {self.limits.max_archive_members} archive members (ScanLimits.max_archive_members)")
 
 
 def _error_result(file_id: str, kind: ScanErrorKind, message: str, scanned_files: int = 1) -> ScanResult:
@@ -301,10 +382,8 @@ _unsafe_globals = {
 _numpy_file_extensions = {".npy"}  # Note: .npz is handled as zip files
 _pytorch_file_extensions = {".bin", ".pt", ".pth", ".ckpt"}
 _pickle_file_extensions = {".pkl", ".pickle", ".joblib", ".dat", ".data"}
-_zip_file_extensions = {".zip", ".npz", ".7z"}
-# Archives can contain archives (zip member disguised as .npy, 7z member disguised as .pkl, zip quines...). Each level recurses, so
-# cap the nesting to keep the scan bounded, and report anything deeper as a scan error rather than silently skipping it.
-_max_archive_depth = 8
+_zip_file_extensions = {".zip", ".npz", ".7z", ".tar", ".tgz"}
+_compressed_file_extensions = {".gz", ".bz2", ".xz", ".lzma", ".z", ".zst", ".lz4", ".tgz"}
 # Read buffer wrapped around zip members: pickletools reads opcode by opcode, and ZipExtFile.read has a high per-call cost
 _zip_member_buffer_size = 1 << 16
 # Pickle members up to this size are read into memory before parsing, which is about twice as fast as parsing from the zip stream.
@@ -327,7 +406,11 @@ _pickle_magic_bytes = {
 _numpy_magic_bytes = b"\x93NUMPY"
 _7z_magic_bytes = b"7z\xbc\xaf\x27\x1c"
 # Extensions scanned without looking at the content first
-_scanned_file_extensions = _zip_file_extensions | _pickle_file_extensions | _pytorch_file_extensions | _numpy_file_extensions
+_scanned_file_extensions = (
+    _zip_file_extensions | _pickle_file_extensions | _pytorch_file_extensions | _numpy_file_extensions | _compressed_file_extensions
+)
+# Bytes read from the start of a file to tell its format (a tar header is 512 bytes)
+_head_size = 512
 # Number of leading bytes read to decide whether a file is worth scanning
 _probe_size = 16
 
@@ -340,7 +423,7 @@ def _should_scan(head: bytes, file_ext: Optional[str]) -> bool:
     """
     if file_ext in _scanned_file_extensions:
         return True
-    if head.startswith((_numpy_magic_bytes, _7z_magic_bytes) + _zip_magic_bytes):
+    if head.startswith((_numpy_magic_bytes, _7z_magic_bytes) + _zip_magic_bytes) or _compression_of(head) is not None:
         return True
     # Protocol 2+ pickles start with PROTO. Also require a valid opcode right after it: other binary formats can start with the
     # same two bytes (a safetensors header length of 640 does), and for Hugging Face scans a false positive means a full download.
@@ -792,6 +875,8 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
                     imported = nested.apply(op, op_value, pos)
                     if imported is not None:
                         globals.alternative.add(imported)
+        except (_LimitExceeded, _MissingDependency):
+            raise
         except Exception as e:
             _log.debug(f"Error parsing pickle: {e}", exc_info=True)
             parsing_pkl_error = str(e)
@@ -914,246 +999,699 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=Fa
     return _build_scan_result_from_raw_globals(raw_globals, file_id, strict=strict)
 
 
-# XXX: it appears there is not way to get the byte stream for a given file within the 7z archive and thus forcing us to unzip to disk before scanning
-def scan_7z_bytes(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
-    _log.debug(f"scan_7z_bytes({file_id})")
+def _cheaply_seekable(f) -> bool:
+    """True for streams where seeking costs nothing (local files, memory): unlike archive members or decompressed streams."""
+    if isinstance(f, (io.BytesIO, io.FileIO)) or getattr(f, "_picklescan_cheap_seek", False):
+        return True
+    raw = getattr(f, "raw", None)
+    return isinstance(f, io.BufferedReader) and (isinstance(raw, io.FileIO) or getattr(raw, "_picklescan_cheap_seek", False))
 
-    if _depth > _max_archive_depth:
-        return _error_result(file_id, ScanErrorKind.LIMIT, f"nested more than {_max_archive_depth} archives deep, not scanned")
 
+# --------------------------------------------------------------------------------------------------------------------------------
+# Compressed streams. pandas.read_pickle decompresses by extension and joblib.load by magic bytes, before unpickling.
+
+
+def _check_decompress(make_decompressor, head: bytes) -> bool:
+    try:
+        make_decompressor().decompress(head)
+        return True
+    except Exception:
+        return False
+
+
+def _check_gzip(head: bytes) -> bool:
+    """Whether gzip.GzipFile (pandas, joblib) reads the head without error: it accepts headers zlib rejects (reserved flags)."""
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(head), mode="rb") as file:
+            file.read(1)
+        return True
+    except EOFError:
+        return True  # the head is only the start of the stream
+    except Exception:
+        return False
+
+
+def _zfile_length(head: bytes) -> Optional[int]:
+    """Uncompressed size in a joblib < 0.9.3 header, parsed as joblib does (int() also accepts spaces, signs, underscores...)."""
+    try:
+        return int(head[2 : 2 + _zfile_length_size], 16)
+    except ValueError:
+        return None
+
+
+# Compressions whose magic bytes are short or absent: a pickle can start the same way
+_weak_compressions = {"zlib", "lzma", "zfile"}
+
+
+def _compression_of(head: bytes, file_ext: Optional[str] = None) -> Optional[str]:
+    """Name of the compression format the data starts with, if any. Magic bytes are confirmed by decompressing the head."""
+    if head.startswith(b"\x1f\x8b"):
+        return "gzip" if _check_gzip(head) else None
+    if head.startswith(b"BZh"):
+        return "bz2" if _check_decompress(bz2.BZ2Decompressor, head) else None
+    if head.startswith(b"\xfd7zXZ\x00"):
+        return "xz" if _check_decompress(lambda: lzma.LZMADecompressor(lzma.FORMAT_XZ), head) else None
+    # A zstd frame, or a skippable frame (the decompressors pandas uses skip them)
+    if head.startswith(b"\x28\xb5\x2f\xfd") or (head[1:4] == b"\x2a\x4d\x18" and head[0] & 0xF0 == 0x50):
+        return "zstd"
+    if head.startswith(b"\x04\x22\x4d\x18"):
+        return "lz4"
+    if head.startswith(b"ZF") and _zfile_length(head) is not None:  # joblib reads any file starting with ZF this way
+        return "zfile"
+    if head[:1] == b"\x78" and len(head) > 1 and (head[0] << 8 | head[1]) % 31 == 0:
+        return "zlib" if _check_decompress(zlib.decompressobj, head) else None
+    # .lzma (lzma_alone) has no magic bytes: a properties byte, then the dictionary and uncompressed sizes. joblib only reads the
+    # usual \x5d\x00 start, lzma.LZMAFile (pandas, for .xz files) any valid properties.
+    if head.startswith(b"\x5d\x00") or (file_ext is not None and file_ext.lower() == ".xz" and head[:1] and head[0] < 225):
+        return "lzma" if _check_decompress(lambda: lzma.LZMADecompressor(lzma.FORMAT_ALONE), head) else None
+    return None
+
+
+# joblib < 0.9.3 compressed files: b"ZF" + the hexadecimal size of the data, padded to the length of hex(2**64), then zlib data
+_zfile_length_size = len(hex(2**64))
+
+
+class _ZlibReader(io.RawIOBase):
+    """Decompresses a zlib stream (joblib's zlib compression), seekable by restarting decompression like gzip.GzipFile."""
+
+    def __init__(self, f: IO[bytes]):
+        self._f = f
+        self._start = f.tell()
+        self._reset()
+
+    def _reset(self):
+        self._f.seek(self._start)
+        self._decompressor = zlib.decompressobj()
+        self._buffer = b""
+        self._pos = 0
+        self._eof = False
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def readinto(self, b) -> int:
+        while len(self._buffer) < len(b) and not self._eof:
+            data = self._decompressor.unconsumed_tail or self._f.read(1 << 16)
+            if not data:
+                self._eof = True
+                break
+            self._buffer += self._decompressor.decompress(data, 1 << 20)
+            self._eof = self._decompressor.eof
+        chunk = self._buffer[: len(b)]
+        self._buffer = self._buffer[len(chunk) :]
+        b[: len(chunk)] = chunk
+        self._pos += len(chunk)
+        return len(chunk)
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_CUR:
+            offset += self._pos
+        elif whence != io.SEEK_SET:
+            raise io.UnsupportedOperation("cannot seek from the end of a zlib stream")
+        if offset < self._pos:
+            self._reset()
+        while self._pos < offset and self.read(min(offset - self._pos, 1 << 20)):
+            pass
+        return self._pos
+
+
+def _open_decompressed(data: IO[bytes], compression: str) -> IO[bytes]:
+    if compression == "gzip":
+        return gzip.GzipFile(fileobj=data, mode="rb")
+    if compression == "bz2":
+        return bz2.BZ2File(data, mode="rb")
+    if compression == "xz":
+        return lzma.LZMAFile(data, format=lzma.FORMAT_XZ)
+    if compression == "lzma":
+        return lzma.LZMAFile(data, format=lzma.FORMAT_ALONE)
+    if compression == "zlib":
+        return _ZlibReader(data)
+    if compression == "zfile":
+        data.read(2 + _zfile_length_size)  # what joblib reads, whatever it holds
+        if data.read(1) != b" ":  # joblib <= 0.8.4 headers were one character wider
+            data.seek(-1, io.SEEK_CUR)
+        return _ZlibReader(data)
+    if compression == "zstd":
+        try:
+            from compression import zstd  # Python 3.14+
+
+            return zstd.ZstdFile(data)
+        except ImportError:
+            pass
+        try:
+            import zstandard
+
+            return zstandard.ZstdDecompressor().stream_reader(data, read_across_frames=True, closefd=False)
+        except ImportError:
+            raise _MissingDependency("zstd decompression requires Python 3.14+ or the zstandard package")
+    if compression == "lz4":
+        try:
+            import lz4.frame
+
+            return lz4.frame.LZ4FrameFile(data)
+        except ImportError:
+            raise _MissingDependency("lz4 decompression requires the lz4 package")
+    raise ValueError(f"unknown compression {compression}")
+
+
+class _CountingReader(io.RawIOBase):
+    """Raw stream over a decompressing file object, charging what it produces to the scan's decompression budget."""
+
+    def __init__(self, f, ctx: _ScanContext):
+        self._f = f
+        self._ctx = ctx
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return self._f.seekable()
+
+    def readinto(self, b) -> int:
+        # read1: one decompression step, so that the data before a corruption is returned before the error is raised
+        data = getattr(self._f, "read1", self._f.read)(len(b))
+        b[: len(data)] = data
+        self._ctx.count_decompressed(len(data))
+        return len(data)
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        position = self._f.tell()
+        if whence == io.SEEK_END:
+            # Decompressing streams find their end by decompressing everything: done here, in counted reads
+            while self.read(1 << 20):
+                pass
+            position = self._f.tell()
+        new_position = self._f.seek(offset, whence)
+        # Decompressing streams seek forward by decompressing, and backward by decompressing again from the start
+        self._ctx.count_decompressed(new_position - position if new_position >= position else new_position)
+        return new_position
+
+    def tell(self) -> int:
+        return self._f.tell()
+
+    def close(self):
+        if not self.closed:
+            try:
+                self._f.close()
+            finally:
+                super().close()
+
+
+def _counted(f, ctx: _ScanContext) -> io.BufferedReader:
+    # The buffer also makes the many small reads of the pickle parser cheap, lets us peek at magic bytes, and absorbs the short
+    # backward seeks that would otherwise make a decompressing stream (ZipExtFile, GzipFile...) start over from the beginning.
+    return io.BufferedReader(_CountingReader(f, ctx), _zip_member_buffer_size)
+
+
+# --------------------------------------------------------------------------------------------------------------------------------
+# NumPy .npy files, parsed without NumPy: np.load unpickles what follows the header when the array dtype holds Python objects.
+
+_npy_plain_type = re.compile(r"[<>|=]?(\?|[biufcmMSUVa]\d*)(\[\w+\])?")
+
+
+def _npy_may_hold_objects(descr) -> bool:
+    """False only when the dtype description certainly holds no Python object (in doubt, the data is scanned as a pickle)."""
+    if isinstance(descr, str):
+        return _npy_plain_type.fullmatch(descr) is None
+    if isinstance(descr, list):  # structured dtype: [(name, format), (name, format, shape)...]
+        try:
+            return any(_npy_may_hold_objects(field[1]) for field in descr)
+        except (TypeError, IndexError):
+            return True
+    return True
+
+
+def _read_npy_header(data: IO[bytes], file_id: str, ctx: _ScanContext):
+    """Reads a .npy header like np.lib.format does. Returns the dtype description, or a ScanResult when the file cannot be read."""
+    magic = data.read(len(_numpy_magic_bytes) + 2)
+    major = magic[-2] if len(magic) == len(_numpy_magic_bytes) + 2 else None
+    if major == 1:
+        size_bytes, encoding = 2, "latin1"
+    elif major in (2, 3):
+        size_bytes, encoding = 4, ("latin1" if major == 2 else "utf8")
+    else:
+        version = tuple(magic[-2:]) if major is not None else None
+        return _error_result(file_id, ScanErrorKind.UNSUPPORTED, f"unsupported numpy format version: {version}")
+    header_size = int.from_bytes(data.read(size_bytes), "little")
+    if header_size > ctx.limits.max_npy_header_size:
+        return _error_result(file_id, ScanErrorKind.LIMIT, f".npy header of {header_size} bytes (ScanLimits.max_npy_header_size)")
+    header = data.read(header_size)
+    try:
+        return ast.literal_eval(header.decode(encoding))["descr"]
+    except Exception:
+        return None  # unreadable description: np.load may still manage, so the data is scanned
+
+
+def _scan_numpy(data: IO[bytes], file_id: str, ctx: _ScanContext) -> ScanResult:
+    descr = _read_npy_header(data, file_id, ctx)
+    if isinstance(descr, ScanResult):
+        return descr
+    if descr is not None and not _npy_may_hold_objects(descr):
+        return ScanResult([], 1)
+    return scan_pickle_bytes(data, file_id, strict=ctx.strict)
+
+
+# --------------------------------------------------------------------------------------------------------------------------------
+# Format detection and the traversal shared by scanning (scan_bytes) and detection (detect_file)
+
+
+def _zip_format(data: IO[bytes]) -> FileFormat:
+    start = data.tell()
+    try:
+        with RelaxedZipFile(data, "r") as zip:
+            names = zip.namelist()
+    except Exception:
+        return FileFormat.ZIP  # reported when the archive is scanned
+    finally:
+        data.seek(start)
+    if any(name == "data.pkl" or name.endswith("/data.pkl") for name in names):
+        return FileFormat.PYTORCH_ZIP
+    if names and all(name.endswith(".npy") for name in names):
+        return FileFormat.NUMPY_ZIP
+    return FileFormat.ZIP
+
+
+def _is_tar_header(head: bytes) -> bool:
+    if len(head) < tarfile.BLOCKSIZE:
+        return False
+    try:
+        tarfile.TarInfo.frombuf(head[: tarfile.BLOCKSIZE], tarfile.ENCODING, "surrogateescape")
+        return True
+    except tarfile.HeaderError:
+        return False
+
+
+def _sniff(data: IO[bytes], head: bytes, file_ext: Optional[str]) -> Tuple[FileFormat, Optional[str]]:
+    """Format of the stream (positioned at its start), and its compression for COMPRESSED."""
+    if head.startswith(_numpy_magic_bytes):
+        return FileFormat.NUMPY, None
+    if head.startswith(_7z_magic_bytes):
+        return FileFormat.SEVEN_ZIP, None
+    if head.startswith(_zip_magic_bytes):
+        return _zip_format(data), None
+    compression = _compression_of(head, file_ext)
+    if compression is not None:
+        return FileFormat.COMPRESSED, compression
+    if _is_tar_header(head):
+        return FileFormat.TAR, None
+    # The PyTorch magic number is attacker-controlled: never let it downgrade a file that claims to be a pickle to the legacy
+    # PyTorch scan, which only reads the fixed number of pickles such a file holds
+    if file_ext not in _pickle_file_extensions and _is_legacy_pytorch(data):
+        return FileFormat.PYTORCH_LEGACY, None
+    if head[:2] in _pickle_magic_bytes:
+        return FileFormat.PICKLE, None
+    return FileFormat.UNKNOWN, None
+
+
+def _may_start_pickle(head: bytes) -> bool:
+    """Whether a file of another format could also be a loadable pickle (polyglot), judging from its first byte.
+
+    A tar file starts with a member name, which can be any opcodes. PERSID (zip) needs a persistent_load the plain unpickler lacks,
+    and a STACK_GLOBAL (NumPy) first has nothing to pop.
+    """
+    return head[:1] not in (b"", b"P", b"\x93") and head[:1].decode("latin-1") in pickletools.code2op
+
+
+def _inner_extension(file_id: str) -> Optional[str]:
+    """Extension of a compressed file's content: .pkl for model.pkl.gz, .tar for model.tgz."""
+    stem, ext = os.path.splitext(file_id)
+    if ext.lower() == ".tgz":
+        return ".tar"
+    return os.path.splitext(stem)[1] if ext.lower() in _compressed_file_extensions else None
+
+
+def _classify_pickle(data: IO[bytes]) -> Tuple[FileFormat, Optional[int]]:
+    """Detection only: a stream without magic bytes is a PICKLE if its first pickle parses up to STOP."""
+    start = data.tell()
+    protocol = 0
+    try:
+        for op, arg, _ in _genops(data):
+            protocol = max(protocol, arg if op.name == "PROTO" else op.proto)
+        return FileFormat.PICKLE, protocol
+    except (_LimitExceeded, _MissingDependency):
+        raise
+    except Exception:
+        return FileFormat.UNKNOWN, None
+    finally:
+        data.seek(start)
+
+
+def _walk(
+    data: IO[bytes], file_id: str, file_ext: Optional[str], ctx: _ScanContext, depth: int, layers: int, size: Optional[int] = None
+) -> FileInfo:
+    """Detects the format of a stream and handles it accordingly: scanned into ctx.result when ctx.scan, only described otherwise."""
+    start = data.tell()
+    head = data.read(_head_size)
+    data.seek(start)
+    fmt, compression = _sniff(data, head, file_ext)
+    info = FileInfo(file_id, fmt, compression=compression)
+    if fmt is FileFormat.PICKLE:
+        info.pickle_protocol = head[1]
+    elif fmt is FileFormat.PYTORCH_LEGACY and head[:1] == b"\x80":
+        info.pickle_protocol = head[1]
+
+    try:
+        _walk_format(data, info, file_ext, ctx, depth, layers, size)
+    except _LimitExceeded as e:
+        info.note = str(e)
+        if ctx.scan:
+            ctx.result.merge(_error_result(file_id, ScanErrorKind.LIMIT, str(e), 0))
+    except _MissingDependency as e:
+        info.note = str(e)
+        if ctx.scan:
+            ctx.result.merge(_error_result(file_id, ScanErrorKind.MISSING_DEPENDENCY, str(e)))
+
+    # Polyglots: loaders reading from the first byte and loaders reading the end of the file can see different formats, and
+    # loaders of different formats can read the same first bytes differently. Only checked where seeking is free (a member of an
+    # archive is checked when it is scanned as a file of its own, once extracted), and for compressions without proper magic bytes.
+    cheap_seek = _cheaply_seekable(data)
+    if (
+        fmt not in (FileFormat.PICKLE, FileFormat.UNKNOWN, FileFormat.PYTORCH_LEGACY)
+        and _may_start_pickle(head)
+        and ctx.scan
+        and (cheap_seek or (compression in _weak_compressions and data.seekable()))
+    ):
+        data.seek(start)
+        found = scan_pickle_bytes(data, file_id, strict=ctx.strict)
+        # Most such files are not pickles, whatever opcodes their first bytes read as: only what would be dangerous is reported
+        dangerous = [g for g in found.globals if g.safety is SafetyLevel.Dangerous]
+        if dangerous:
+            ctx.result.merge(ScanResult(dangerous, 0, len(dangerous), 1))
+    if fmt is not FileFormat.TAR and cheap_seek and _is_tar_header(head):
+        # torch.load tries legacy files as tar archives before anything else
+        _log.debug(f"{file_id} is also a tar archive, scanning both")
+        data.seek(start)
+        info.members.append(_walk_archive(data, FileInfo(file_id, FileFormat.TAR), ctx, depth, _walk_tar_members))
+    # Zip readers find an archive from the end of the file. Not in tar and 7z archives: what is at their end is a member.
+    if fmt not in (FileFormat.ZIP, FileFormat.PYTORCH_ZIP, FileFormat.NUMPY_ZIP, FileFormat.TAR, FileFormat.SEVEN_ZIP) and cheap_seek:
+        data.seek(start)
+        if zipfile.is_zipfile(data):
+            data.seek(start)
+            try:
+                RelaxedZipFile(data, "r").close()
+                info.trailing_zip = True
+            except (zipfile.BadZipFile, ValueError, OSError, NotImplementedError) as e:
+                # is_zipfile only looks for an end record: if no zip reader can open the archive, there is nothing to load from it
+                _log.warning(f"WARNING: could not open the zip archive at the end of {file_id}: {e}")
+        if info.trailing_zip:
+            _log.debug(f"{file_id} has data in front of a zip archive, scanning both")
+            data.seek(start)
+            info.members.append(_walk_archive(data, FileInfo(file_id, FileFormat.ZIP), ctx, depth, _walk_zip_members))
+    data.seek(start)
+    return info
+
+
+def _walk_format(data, info: FileInfo, file_ext, ctx: _ScanContext, depth: int, layers: int, size: Optional[int]):
+    fmt, file_id = info.format, info.file_id
+    if fmt is FileFormat.NUMPY:
+        if ctx.scan:
+            ctx.result.merge(_scan_numpy(data, file_id, ctx))
+    elif fmt in (FileFormat.PYTORCH_ZIP, FileFormat.NUMPY_ZIP):
+        # Model files that happen to be zip archives: a model file in an archive is opened one level deeper than other archives
+        _walk_archive(data, info, ctx, depth, _walk_zip_members, extra_level=True)
+    elif fmt is FileFormat.ZIP:
+        _walk_archive(data, info, ctx, depth, _walk_zip_members)
+    elif fmt is FileFormat.SEVEN_ZIP:
+        _walk_archive(data, info, ctx, depth, _walk_7z_members)
+    elif fmt is FileFormat.TAR:
+        _walk_archive(data, info, ctx, depth, _walk_tar_members)
+    elif fmt is FileFormat.COMPRESSED:
+        if layers >= ctx.limits.max_compression_layers:
+            raise _LimitExceeded(
+                f"more than {ctx.limits.max_compression_layers} nested compressed streams (ScanLimits.max_compression_layers)"
+            )
+        compressed_start = data.tell()
+        read_error = None
+        try:
+            with _counted(_open_decompressed(data, info.compression), ctx) as content:
+                if ctx.scan:
+                    # Small content is decompressed in memory, up to a corruption if any: loaders run what precedes it
+                    content_bytes, read_error = _read_until_error(content, _max_in_memory_pickle_member_size + 1)
+                    if len(content_bytes) <= _max_in_memory_pickle_member_size:
+                        content = io.BytesIO(content_bytes)
+                    else:
+                        read_error = None
+                        data.seek(compressed_start)
+                        content = _counted(_open_decompressed(data, info.compression), ctx)
+                with content:
+                    info.members.append(_walk(content, file_id, _inner_extension(file_id), ctx, depth, layers + 1))
+        except (OSError, EOFError, zlib.error, lzma.LZMAError, ValueError, RuntimeError) as e:
+            read_error = e
+        if read_error is not None:
+            info.note = f"cannot decompress {info.compression} data: {read_error}"
+            if ctx.scan:
+                ctx.result.merge(_error_result(file_id, ScanErrorKind.ARCHIVE, info.note, 0 if info.members else 1))
+    elif fmt is FileFormat.PYTORCH_LEGACY:
+        if ctx.scan:
+            ctx.result.merge(_scan_pytorch_legacy(data, file_id, ctx))
+    elif ctx.scan:
+        # PICKLE, and UNKNOWN: protocol 0 and 1 pickles have no magic bytes. Data that is not a pickle fails to parse before any
+        # import, which is reported as "not a pickle" rather than as an error.
+        read_error = None
+        if size is not None and size <= _max_in_memory_pickle_member_size and not _cheaply_seekable(data):
+            # Archive member: parsing from memory is about twice as fast. Loaders reading the member as a stream run what precedes a
+            # corruption, so what could be read is scanned.
+            content, read_error = _read_until_error(data)
+            data = io.BytesIO(content)
+        ctx.result.merge(scan_pickle_bytes(data, file_id, strict=ctx.strict))
+        if read_error is not None:
+            message = f"cannot read past byte {data.getbuffer().nbytes}: {read_error}"
+            ctx.result.merge(_error_result(file_id, ScanErrorKind.ARCHIVE, message, 0))
+    elif fmt is FileFormat.UNKNOWN:
+        info.format, info.pickle_protocol = _classify_pickle(data)
+
+
+def _walk_archive(data, info: FileInfo, ctx: _ScanContext, depth: int, walk_members, extra_level: bool = False) -> FileInfo:
+    if depth >= ctx.limits.max_archive_depth + extra_level:
+        info.note = f"{info.format.value} archive nested in another archive: not opened (ScanLimits.max_archive_depth)"
+        if ctx.scan:
+            _log.info(f"{info.file_id}: {info.note}")
+            ctx.result.skipped.append(SkippedFile(info.file_id, info.note))
+        return info
+    walk_members(data, info, ctx, depth + 1)
+    return info
+
+
+def _walk_zip_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
+    model_file = info.format in (FileFormat.PYTORCH_ZIP, FileFormat.NUMPY_ZIP)
+    try:
+        zip = RelaxedZipFile(data, "r")
+    except (zipfile.BadZipFile, ValueError, OSError, NotImplementedError) as e:
+        info.note = f"cannot open zip archive: {e}"
+        if ctx.scan:
+            ctx.result.merge(_error_result(info.file_id, ScanErrorKind.ARCHIVE, info.note))
+        return
+    with zip:
+        names = zip.namelist()
+        _log.debug("Files in zip archive %s: %s", info.file_id, names)
+        storage_records = _torch_storage_records(names) if info.format is FileFormat.PYTORCH_ZIP else ()
+        seen_offsets = set()
+        for member in zip.infolist():
+            ctx.count_member()
+            # Several directory entries can point at the same data: scan it once
+            if member.is_dir() or member.header_offset in seen_offsets:
+                continue
+            seen_offsets.add(member.header_offset)
+            member_id = f"{info.file_id}:{member.filename}"
+            member_ext = os.path.splitext(member.filename)[1]
+            if member.filename in storage_records:
+                continue  # raw tensor data, never unpickled
+            try:
+                with _counted(zip.open(member, "r"), ctx) as file:
+                    if model_file and member_ext not in _pickle_file_extensions and not _known_by_content(file.peek(_head_size)):
+                        continue  # torch.load and np.load read nothing else than pickles and arrays, never text or raw data
+                    _log.debug("Scanning file %s in zip archive %s", member.filename, info.file_id)
+                    info.members.append(_walk(file, member_id, member_ext, ctx, depth, 0, size=member.file_size))
+            except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, EOFError, OSError, ValueError) as e:
+                # Decompression issues: password protected, corrupted, unsupported compression method...
+                info.members.append(FileInfo(member_id, FileFormat.UNKNOWN, note=f"cannot read zip member: {e}"))
+                if ctx.scan:
+                    ctx.result.merge(_error_result(member_id, ScanErrorKind.ARCHIVE, f"cannot read zip member: {e}", 0))
+
+
+def _torch_storage_records(names: List[str]) -> Set[str]:
+    """Members of a torch.save zip holding raw tensor data: {root}/data/{key}, next to {root}/data.pkl."""
+    roots = {name[: -len("data.pkl")] for name in names if name == "data.pkl" or name.endswith("/data.pkl")}
+    return {name for name in names if any(name.startswith(f"{root}data/") and "/" not in name[len(root) + 5 :] for root in roots)}
+
+
+def _known_by_content(head: bytes) -> bool:
+    """Whether the head starts with the magic bytes of a format we scan."""
+    return (
+        head.startswith((_numpy_magic_bytes, _7z_magic_bytes) + _zip_magic_bytes)
+        or head[:2] in _pickle_magic_bytes
+        or _compression_of(head) is not None
+        or _is_tar_header(head)
+    )
+
+
+def _read_until_error(file: IO[bytes], limit: int = -1) -> Tuple[bytes, Optional[Exception]]:
+    """Reads a stream to its end (or limit bytes), or up to a read error (corrupted compressed data...): what was read, and the error."""
+    chunks = []
+    size = 0
+    read = getattr(file, "read1", file.read)  # one read at a time, so that what is read before an error is kept
+    try:
+        while size != limit:
+            chunk = read(1 << 20 if limit < 0 else min(1 << 20, limit - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    except (_LimitExceeded, _MissingDependency):
+        raise
+    except Exception as e:  # each decompressor has errors of its own (zstd, lz4...)
+        return b"".join(chunks), e
+    return b"".join(chunks), None
+
+
+# XXX: it appears there is no way to get the byte stream of a file within a 7z archive, forcing us to extract to disk before scanning
+def _walk_7z_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
     try:
         import py7zr
     except ImportError:
-        return _error_result(file_id, ScanErrorKind.MISSING_DEPENDENCY, "py7zr is required to scan 7z archives: pip install picklescan[7z]")
-    result = ScanResult([])
+        raise _MissingDependency("py7zr is required to scan 7z archives: pip install picklescan[7z]")
+    try:
+        with py7zr.SevenZipFile(data, mode="r") as archive:
+            members = [m for m in archive.list() if not m.is_directory]
+            for member in members:
+                ctx.count_member()
+            ctx.count_decompressed(sum(m.uncompressed or 0 for m in members))
+            _log.debug("Files in 7z archive %s: %s", info.file_id, [m.filename for m in members])
+            with TemporaryDirectory() as tmpdir:
+                archive.extractall(path=tmpdir)
+                root = os.path.realpath(tmpdir)
+                for member in members:
+                    path = os.path.realpath(os.path.join(tmpdir, member.filename))
+                    member_id = f"{info.file_id}:{member.filename}"
+                    if not path.startswith(root + os.sep) or not os.path.isfile(path):
+                        note = "not a regular file of the archive (link, special file...): not scanned"
+                        info.members.append(FileInfo(member_id, FileFormat.UNKNOWN, note=note))
+                        if ctx.scan:
+                            ctx.result.skipped.append(SkippedFile(member_id, note))
+                        continue
+                    with open(path, "rb") as file:
+                        info.members.append(_walk(file, member_id, os.path.splitext(member.filename)[1], ctx, depth, 0))
+    except (_LimitExceeded, _MissingDependency):
+        raise
+    except Exception as e:
+        info.note = f"cannot read 7z archive: {e}"
+        if ctx.scan:
+            ctx.result.merge(_error_result(info.file_id, ScanErrorKind.ARCHIVE, info.note))
 
-    with py7zr.SevenZipFile(data, mode="r") as archive:
-        file_names = archive.getnames()
-        targets = [f for f in file_names if f.endswith(tuple(_pickle_file_extensions))]
-        _log.debug("Files in 7z archive %s: %s", file_id, targets)
-        with TemporaryDirectory() as tmpdir:
-            archive.extract(path=tmpdir, targets=targets)
-            for file_name in targets:
-                file_path = os.path.join(tmpdir, file_name)
-                _log.debug("Scanning file %s in 7z archive %s", file_name, file_id)
-                if os.path.isfile(file_path):
-                    with open(file_path, "rb") as file:
-                        result.merge(scan_bytes(file, file_path, os.path.splitext(file_path)[1], strict=strict, _depth=_depth + 1))
 
-            return result
+def _walk_tar_members(data, info: FileInfo, ctx: _ScanContext, depth: int):
+    try:
+        with tarfile.open(fileobj=data, mode="r:") as tar:
+            while True:
+                member = tar.next()
+                tar.members = []  # TarFile keeps every member it reads otherwise
+                if member is None:
+                    break
+                ctx.count_member()
+                if not member.isfile():
+                    continue
+                member_id = f"{info.file_id}:{member.name}"
+                with tar.extractfile(member) as file:
+                    info.members.append(_walk(file, member_id, os.path.splitext(member.name)[1], ctx, depth, 0, size=member.size))
+    except (tarfile.TarError, OSError, EOFError, zlib.error, lzma.LZMAError) as e:
+        info.note = f"cannot read tar archive: {e}"
+        if ctx.scan:
+            ctx.result.merge(_error_result(info.file_id, ScanErrorKind.ARCHIVE, info.note))
 
 
-def scan_zip_bytes(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
+def _scan_pytorch_legacy(data: IO[bytes], file_id: str, ctx: _ScanContext) -> ScanResult:
+    """torch.load of a legacy file reads a fixed sequence of pickles (magic number, protocol version, system info, the object, the
+    storage keys), then raw storage data that is not a pickle."""
+    scan_result = ScanResult([])
+    for _ in range(5):
+        scan_result.merge(scan_pickle_bytes(data, file_id, multiple_pickles=False, strict=ctx.strict))
+    scan_result.scanned_files = 1
+    scan_result.infected_files = min(1, scan_result.infected_files)
+    return scan_result
+
+
+def _scan(data: IO[bytes], file_id: str, file_ext: Optional[str], strict: bool, limits: Optional[ScanLimits]) -> ScanResult:
+    ctx = _ScanContext(strict=strict, limits=limits)
+    _walk(data, file_id, file_ext, ctx, depth=0, layers=0)
+    return ctx.result
+
+
+# --------------------------------------------------------------------------------------------------------------------------------
+# Public scanners for a given format
+
+
+def scan_7z_bytes(data: IO[bytes], file_id, strict=False, limits: Optional[ScanLimits] = None) -> ScanResult:
+    _log.debug(f"scan_7z_bytes({file_id})")
+    ctx = _ScanContext(strict=strict, limits=limits)
+    try:
+        _walk_7z_members(data, FileInfo(file_id, FileFormat.SEVEN_ZIP), ctx, depth=1)
+    except _MissingDependency as e:
+        ctx.result.merge(_error_result(file_id, ScanErrorKind.MISSING_DEPENDENCY, str(e)))
+    except _LimitExceeded as e:
+        ctx.result.merge(_error_result(file_id, ScanErrorKind.LIMIT, str(e), 0))
+    return ctx.result
+
+
+def scan_zip_bytes(data: IO[bytes], file_id, strict=False, limits: Optional[ScanLimits] = None) -> ScanResult:
     _log.debug(f"scan_zip_bytes({file_id})")
-
-    if _depth > _max_archive_depth:
-        return _error_result(file_id, ScanErrorKind.LIMIT, f"nested more than {_max_archive_depth} archives deep, not scanned")
-
-    result = ScanResult([])
-
+    ctx = _ScanContext(strict=strict, limits=limits)
     try:
-        zip = RelaxedZipFile(data, "r")
-    except (zipfile.BadZipFile, ValueError, OSError) as e:
-        return _error_result(file_id, ScanErrorKind.ARCHIVE, f"cannot open zip archive: {e}")
-    with zip:
-        file_names = zip.namelist()
-        _log.debug("Files in zip archive %s: %s", file_id, file_names)
-        for file_name in file_names:
-            try:
-                # Members are wrapped in a BufferedReader: it makes the many small reads of the pickle parser cheap, lets us peek at the
-                # magic bytes without reopening the member, and absorbs short backward seeks that would otherwise make ZipExtFile
-                # rewind and decompress the member again from its start.
-                with zip.open(file_name, "r") as member, io.BufferedReader(member, _zip_member_buffer_size) as file:
-                    magic_bytes = file.peek(8)[:8]
-                    file_ext = os.path.splitext(file_name)[1]
-                    member_id = f"{file_id}:{file_name}"
-
-                    # Magic bytes take precedence over the file extension
-                    if magic_bytes.startswith(_numpy_magic_bytes):
-                        _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
-                        # Not read in full: scan_numpy only reads the header of numeric arrays, which can be gigabytes
-                        result.merge(scan_numpy(file, member_id, strict=strict, _depth=_depth + 1))
-
-                    elif file_ext in _pickle_file_extensions or any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
-                        _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
-                        # ZipExtFile never returns more than the declared size, so the in-memory copy is bounded too
-                        if zip.getinfo(file_name).file_size <= _max_in_memory_pickle_member_size:
-                            data, read_error = _read_until_error(file)
-                            result.merge(scan_pickle_bytes(io.BytesIO(data), member_id, strict=strict))
-                            if read_error is not None:
-                                # Loaders reading the member as a stream run what precedes the corruption: that part was scanned
-                                message = f"cannot read zip member past byte {len(data)}: {read_error}"
-                                result.merge(_error_result(member_id, ScanErrorKind.ARCHIVE, message, 0))
-                        else:
-                            result.merge(scan_pickle_bytes(file, member_id, strict=strict))
-
-                    elif file_ext in _numpy_file_extensions:
-                        _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
-                        result.merge(scan_numpy(file, member_id, strict=strict, _depth=_depth + 1))
-            except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, EOFError, OSError) as e:
-                # Decompression issues: password protected, corrupted, unsupported compression method...
-                result.merge(_error_result(f"{file_id}:{file_name}", ScanErrorKind.ARCHIVE, f"cannot read zip member: {e}", 0))
-
-    return result
+        _walk_zip_members(data, FileInfo(file_id, _zip_format(data)), ctx, depth=1)
+    except _LimitExceeded as e:
+        ctx.result.merge(_error_result(file_id, ScanErrorKind.LIMIT, str(e), 0))
+    return ctx.result
 
 
-def _read_until_error(file: IO[bytes]) -> Tuple[bytes, Optional[Exception]]:
-    """Reads a stream to its end, or up to a read error (corrupted compressed data...): what was read, and the error."""
-    chunks = []
-    try:
-        while True:
-            chunk = file.read(1 << 20)
-            if not chunk:
-                return b"".join(chunks), None
-            chunks.append(chunk)
-    except (zipfile.BadZipFile, zlib.error, EOFError, OSError) as e:
-        return b"".join(chunks), e
-
-
-def scan_numpy(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
+def scan_numpy(data: IO[bytes], file_id, strict=False, limits: Optional[ScanLimits] = None) -> ScanResult:
+    """Scans a .npy file, or an .npz file. NumPy is not needed."""
     _log.debug(f"scan_numpy({file_id})")
-
-    # Delay import to avoid dependency on NumPy
-    import numpy as np
-
-    # Code to distinguish from NumPy binary files and pickles.
-    N = len(np.lib.format.MAGIC_PREFIX)
-    magic = data.read(N)
-    # If the file size is less than N, we need to make sure not
-    # to seek past the beginning of the file
-    data.seek(-min(N, len(magic)), 1)  # back-up
+    start = data.tell()
+    magic = data.read(len(_numpy_magic_bytes))
+    data.seek(start)
     if magic.startswith(_zip_magic_bytes):
-        return scan_zip_bytes(data, file_id, strict=strict, _depth=_depth)
-    elif magic == np.lib.format.MAGIC_PREFIX:
-        # .npy file
-
-        version = np.lib.format.read_magic(data)
-        if version == (1, 0):
-            _, _, dtype = np.lib.format.read_array_header_1_0(data)
-        elif version in [(2, 0), (3, 0)]:
-            _, _, dtype = np.lib.format.read_array_header_2_0(data)
-        else:
-            return _error_result(file_id, ScanErrorKind.UNSUPPORTED, f"unsupported numpy format version: {version}")
-
-        if dtype.hasobject:
-            return scan_pickle_bytes(data, file_id, strict=strict)
-        else:
-            return ScanResult([], 1)
-    else:
-        return scan_pickle_bytes(data, file_id, strict=strict)
+        return scan_zip_bytes(data, file_id, strict=strict, limits=limits)
+    if magic == _numpy_magic_bytes:
+        return _scan_numpy(data, file_id, _ScanContext(strict=strict, limits=limits))
+    return scan_pickle_bytes(data, file_id, strict=strict)
 
 
-def scan_pytorch(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
+def scan_pytorch(data: IO[bytes], file_id, strict=False, limits: Optional[ScanLimits] = None) -> ScanResult:
     _log.debug(f"scan_pytorch({file_id})")
 
     # new pytorch format
     if _is_zipfile(data):
-        return scan_zip_bytes(data, file_id, strict=strict, _depth=_depth)
+        return scan_zip_bytes(data, file_id, strict=strict, limits=limits)
     elif _is_7z_file(data):
-        return scan_7z_bytes(data, file_id, strict=strict, _depth=_depth)
+        return scan_7z_bytes(data, file_id, strict=strict, limits=limits)
     # old pytorch format
-    else:
-        scan_result = ScanResult([])
-        should_read_directly = _should_read_directly(data)
-        if should_read_directly and data.tell() == 0:
-            # try loading from tar
-            try:
-                # TODO: implement loading from tar
-                raise TarError()
-            except TarError:
-                # file does not contain a tar
-                data.seek(0)
-
-        magic = get_magic_number(data)
-        if magic != MAGIC_NUMBER:
-            # Magic number doesn't match or can't be extracted (None).
-            # This could be a bypass attempt where the magic number is
-            # embedded via __reduce__ (e.g., eval('MAGIC_NUMBER')) instead
-            # of a literal INT/LONG. Scan the first pickle to check for
-            # dangerous globals -- a legitimate magic pickle contains only
-            # a simple integer and should have zero globals.
-            data.seek(0)
-            first_pickle_result = scan_pickle_bytes(data, file_id, multiple_pickles=False, strict=strict)
-            if first_pickle_result.globals:
-                _log.debug(
-                    f"Potential PyTorch magic number bypass detected in {file_id}. Ignoring magic number and treating file as a pickle."
-                )
-                scan_result.merge(first_pickle_result)
-            else:
-                raise InvalidMagicError(magic, MAGIC_NUMBER, file_id)
-
-        for _ in range(5):
-            scan_result.merge(scan_pickle_bytes(data, file_id, multiple_pickles=False, strict=strict))
-        scan_result.scanned_files = 1
-        scan_result.infected_files = min(1, scan_result.infected_files)
-        return scan_result
-
-
-def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None, strict=False, _depth=0) -> ScanResult:
-    _log.debug(f"scan_bytes({file_id})")
-
     start = data.tell()
-    magic_bytes = data.read(8)
-    data.seek(start)
-    is_zip = zipfile.is_zipfile(data)
-    data.seek(start)
-
-    result = _scan_bytes_by_content(data, file_id, file_ext, magic_bytes, is_zip, strict, _depth)
-
-    # zipfile (and loaders built on it, like pandas.read_pickle on a .zip) locates an archive from its end record and ignores
-    # anything in front of it, while pickle, NumPy and PyTorch loaders read from the first byte. A file holding a zip that does not
-    # start at offset 0 is therefore read differently by each: scan the zip too, on top of the content found at the start.
-    if is_zip and not magic_bytes.startswith(_zip_magic_bytes):
-        _log.debug(f"{file_id} has data in front of a zip archive, scanning both")
+    magic = get_magic_number(data)
+    if magic != MAGIC_NUMBER:
+        # Magic number doesn't match or can't be extracted (None). This could be a bypass attempt where the magic number is
+        # embedded via __reduce__ (e.g., eval('MAGIC_NUMBER')) instead of a literal INT/LONG. Scan the first pickle to check for
+        # dangerous globals -- a legitimate magic pickle contains only a simple integer and should have zero globals.
+        first_pickle_result = scan_pickle_bytes(data, file_id, multiple_pickles=False, strict=strict)
+        if not first_pickle_result.globals:
+            raise InvalidMagicError(magic, MAGIC_NUMBER, file_id)
+        _log.debug(f"Potential PyTorch magic number bypass detected in {file_id}. Ignoring magic number and treating file as a pickle.")
         data.seek(start)
-        try:
-            RelaxedZipFile(data, "r").close()
-        except (zipfile.BadZipFile, ValueError, OSError) as e:
-            # is_zipfile only checks for an end record: if no zip reader can open the archive, there is nothing to load from it
-            _log.warning(f"WARNING: could not open the zip archive embedded in {file_id}: {e}")
-        else:
-            data.seek(start)
-            result.merge(scan_zip_bytes(data, file_id, strict=strict, _depth=_depth))
-
-    return result
-
-
-def _scan_bytes_by_content(data: IO[bytes], file_id, file_ext, magic_bytes, is_zip, strict, _depth) -> ScanResult:
-    start = data.tell()
-
-    def is_legacy_pytorch() -> bool:
-        return file_ext not in _pickle_file_extensions and _is_legacy_pytorch(data)
-
-    if magic_bytes.startswith(_numpy_magic_bytes):
-        return scan_numpy(data, file_id, strict=strict, _depth=_depth)
-
-    if file_ext is not None and file_ext in _pytorch_file_extensions:
-        try:
-            return scan_pytorch(data, file_id, strict=strict, _depth=_depth)
-        except InvalidMagicError as e:
-            _log.warning(
-                f"WARNING: Invalid PyTorch magic number for file {e}. Trying to scan as non-PyTorch file.",
-                exc_info=_log.isEnabledFor(logging.DEBUG),
-            )
-            data.seek(start)
-
-    if any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
-        if is_legacy_pytorch():
-            return scan_pytorch(data, file_id, strict=strict, _depth=_depth)
         return scan_pickle_bytes(data, file_id, strict=strict)
-
-    # A zip with data in front of it is scanned by scan_bytes on top of the content at the start
-    if is_zip and magic_bytes.startswith(_zip_magic_bytes):
-        return scan_zip_bytes(data, file_id, strict=strict, _depth=_depth)
-    elif _is_7z_file(data):
-        return scan_7z_bytes(data, file_id, strict=strict, _depth=_depth)
-    elif is_legacy_pytorch():
-        return scan_pytorch(data, file_id, strict=strict, _depth=_depth)
-    else:
-        return scan_pickle_bytes(data, file_id, strict=strict)
+    return _scan_pytorch_legacy(data, file_id, _ScanContext(strict=strict, limits=limits))
 
 
-def scan_huggingface_model(repo_id, strict=False):
+def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None, strict=False, limits: Optional[ScanLimits] = None) -> ScanResult:
+    """Scans a stream of any supported format, told apart by content (file_ext only breaks ties)."""
+    _log.debug(f"scan_bytes({file_id})")
+    return _scan(data, file_id, file_ext, strict, limits)
+
+
+def scan_huggingface_model(repo_id, strict=False, limits: Optional[ScanLimits] = None):
     _log.debug(f"scan_huggingface_model({repo_id})")
 
     # List model files
@@ -1170,7 +1708,7 @@ def scan_huggingface_model(repo_id, strict=False):
             _log.debug("Skipping file %s in model %s: not a format we scan", file_name, repo_id)
             continue
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
-        scan_result.merge(_isolated(lambda: scan_bytes(io.BytesIO(_http_get(url)), url, file_ext, strict=strict), url))
+        scan_result.merge(_isolated(lambda: scan_bytes(io.BytesIO(_http_get(url)), url, file_ext, strict=strict, limits=limits), url))
 
     return scan_result
 
@@ -1191,7 +1729,7 @@ def _matches_any(patterns: List[re.Pattern], text: str) -> bool:
     return any(p.search(text) for p in patterns)
 
 
-def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None, strict=False) -> ScanResult:
+def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None, strict=False, limits: Optional[ScanLimits] = None) -> ScanResult:
     _log.debug(f"scan_directory_path({path})")
 
     scan_result = ScanResult([])
@@ -1236,22 +1774,36 @@ def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None, strict=F
                         return ScanResult([])
                     file.seek(0)
                     _log.debug("Scanning file %s", file_path)
-                    return scan_bytes(file, file_path, file_ext, strict=strict)
+                    return scan_bytes(file, file_path, file_ext, strict=strict, limits=limits)
 
             scan_result.merge(_isolated(scan_one, file_path))
 
     return scan_result
 
 
-def scan_file_path(path, strict=False) -> ScanResult:
+def scan_file_path(path, strict=False, limits: Optional[ScanLimits] = None) -> ScanResult:
     _log.debug(f"scan_file_path({path})")
 
     file_ext = os.path.splitext(path)[1]
     with open(path, "rb") as file:
-        return scan_bytes(file, path, file_ext, strict=strict)
+        return scan_bytes(file, path, file_ext, strict=strict, limits=limits)
 
 
-def scan_url(url, strict=False) -> ScanResult:
+def scan_url(url, strict=False, limits: Optional[ScanLimits] = None) -> ScanResult:
     _log.debug(f"scan_url({url})")
 
-    return scan_bytes(io.BytesIO(_http_get(url)), url, strict=strict)
+    return scan_bytes(io.BytesIO(_http_get(url)), url, strict=strict, limits=limits)
+
+
+def detect_file(data: IO[bytes], file_id: str = "", file_ext: Optional[str] = None, limits: Optional[ScanLimits] = None) -> FileInfo:
+    """Tells what a stream contains, and for archives and compressed files, what their content is, without scanning anything.
+
+    Archives are inspected down to ``limits.max_archive_depth`` levels. Content without magic bytes is reported as PICKLE when its
+    first pickle parses up to STOP, UNKNOWN otherwise.
+    """
+    return _walk(data, file_id, file_ext, _ScanContext(limits=limits, scan=False), depth=0, layers=0)
+
+
+def detect_file_path(path, limits: Optional[ScanLimits] = None) -> FileInfo:
+    with open(path, "rb") as file:
+        return detect_file(file, path, os.path.splitext(path)[1], limits=limits)

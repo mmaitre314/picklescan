@@ -1056,6 +1056,14 @@ def initialize_numpy_files():
     if not os.path.exists(path):
         np.savez_compressed(path, a=np.array([0, 1, 2], dtype=int), b=np.array([3, 4, 5], dtype=int))
 
+    # joblib.load decompresses files it recognizes by their magic bytes before unpickling them
+    for compress in ("zlib", "gzip", "bz2", "lzma", "xz"):
+        path = f"{_root_path}/data2/joblib_malicious_{compress}.joblib"
+        if not os.path.exists(path):
+            import joblib
+
+            joblib.dump(Malicious1(), path, compress=(compress, 3))
+
     # joblib writes object arrays as a complete pickle embedded in the middle of the outer pickle
     for protocol in (2, 3, 4, 5):
         path = f"{_root_path}/data2/joblib_object_array_p{protocol}.joblib"
