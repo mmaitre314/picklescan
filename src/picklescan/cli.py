@@ -4,7 +4,7 @@ import os
 import re
 import sys
 
-from .scanner import ScanFilter, ScanResult, scan_directory_path
+from .scanner import ScanFilter, ScanResult, scan_directory_path, _printable
 from .scanner import scan_file_path
 from .scanner import scan_url
 from .scanner import scan_huggingface_model
@@ -12,28 +12,106 @@ from .scanner import scan_huggingface_model
 _log = logging.getLogger("picklescan")
 
 
-def print_summary(show_globals: bool, sr: ScanResult):
-    _log.info(f"""----------- SCAN SUMMARY -----------
-Scanned files: {sr.scanned_files}
-Infected files: {sr.infected_files}
-Suspicious globals: {sr.suspicious_count}
-Dangerous globals: {sr.issues_count}
-Scan errors: {len(sr.errors)}
-Not scanned: {len(sr.skipped)}""")
+class Style:
+    """ANSI colors for terminal output. The scanner itself never colors anything: only what the command line prints."""
+
+    _codes = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def __call__(self, text: str, *styles: str) -> str:
+        if not self.enabled or not styles or not text:
+            return text
+        return f"\x1b[{';'.join(self._codes[s] for s in styles)}m{text}\x1b[0m"
+
+
+def _enable_windows_colors(stream) -> bool:
+    """Windows consoles show ANSI colors once asked to (ENABLE_VIRTUAL_TERMINAL_PROCESSING, Windows 10 and later)."""
+    try:
+        import ctypes
+        import msvcrt
+
+        kernel32 = ctypes.windll.kernel32
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        mode = ctypes.c_uint32()
+        return bool(kernel32.GetConsoleMode(handle, ctypes.byref(mode)) and kernel32.SetConsoleMode(handle, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+def color_enabled(choice: str, stream) -> bool:
+    """--color always/never, or auto: colors on a terminal, unless NO_COLOR is set (https://no-color.org), or forced by FORCE_COLOR."""
+    if choice != "auto":
+        if choice == "always" and sys.platform == "win32":
+            _enable_windows_colors(stream)
+        return choice == "always"
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    if os.environ.get("TERM") == "dumb" or not (hasattr(stream, "isatty") and stream.isatty()):
+        return False
+    return sys.platform != "win32" or _enable_windows_colors(stream)
+
+
+class _LogFormatter(logging.Formatter):
+    """Colors the messages the scanner logs while it runs, by severity. What the scanned files can put in them (names, paths...) is
+    escaped, except in the summary, which escapes it itself (records with picklescan_summary set)."""
+
+    def __init__(self, style: Style):
+        super().__init__()
+        self.style = style
+
+    def format(self, record: logging.LogRecord) -> str:
+        if getattr(record, "picklescan_summary", False):
+            return record.getMessage()
+        message = _printable(record.getMessage())
+        if record.exc_info:
+            message += "\n" + self.formatException(record.exc_info)
+        if record.levelno >= logging.ERROR or (record.levelno >= logging.WARNING and getattr(record, "picklescan_dangerous", False)):
+            return self.style(message, "red")
+        if record.levelno >= logging.WARNING:
+            return self.style(message, "yellow")
+        return message
+
+
+_safety_styles = {"dangerous": ("red", "bold"), "suspicious": ("yellow",), "innocuous": ("dim",)}
+_summary = {"picklescan_summary": True}
+
+
+def print_summary(show_globals: bool, sr: ScanResult, style: Style = Style(False)):
+    def count(label: str, value: int, *styles: str) -> str:
+        return f"{label}: {style(str(value), *styles) if value else value}"
+
+    _log.info(
+        "\n".join(
+            [
+                style("----------- SCAN SUMMARY -----------", "bold"),
+                f"Scanned files: {sr.scanned_files}",
+                count("Infected files", sr.infected_files, "red", "bold"),
+                count("Suspicious globals", sr.suspicious_count, "yellow"),
+                count("Dangerous globals", sr.issues_count, "red", "bold"),
+                count("Scan errors", len(sr.errors), "red"),
+                count("Not scanned", len(sr.skipped), "yellow"),
+            ]
+        ),
+        extra=_summary,
+    )
     for error in sr.errors:
-        _log.info("\n" + error.format())
+        _log.info("\n" + error.format(style), extra=_summary)
     for skipped in sr.skipped:
-        _log.info("\n" + skipped.format())
+        _log.info("\n" + skipped.format(style), extra=_summary)
     if show_globals and len(sr.globals) > 0:
         _log.info("All globals found:")
         for g in sr.globals:
-            where = f"{g.location.describe()}: " if g.location is not None else ""
-            _log.info(f"  * {where}{g.module}.{g.name} - {g.safety.value}")
+            where = f"{style(_printable(g.location.describe()), 'dim')}: " if g.location is not None else ""
+            name = _printable(f"{g.module}.{g.name}")
+            _log.info(f"  * {where}{name} - {style(g.safety.value, *_safety_styles[g.safety.value])}", extra=_summary)
 
 
 def main():
     _log.setLevel(logging.INFO)
-    _log.addHandler(logging.StreamHandler(stream=sys.stdout))
 
     parser = argparse.ArgumentParser(description="Security scanner detecting Python Pickle files performing suspicious actions.")
     group = parser.add_mutually_exclusive_group()
@@ -46,6 +124,12 @@ def main():
         dest="huggingface_model",
     )
     parser.add_argument("-g", "--globals", help="list all globals found", action="store_true")
+    parser.add_argument(
+        "--color",
+        choices=["auto", "always", "never"],
+        default="auto",
+        help="colored output: auto (default) colors on a terminal, unless the NO_COLOR environment variable is set",
+    )
     parser.set_defaults(globals=False)
     parser.add_argument(
         "--strict",
@@ -92,6 +176,11 @@ def main():
 
     args = parser.parse_args()
 
+    style = Style(color_enabled(args.color, sys.stdout))
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setFormatter(_LogFormatter(style))
+    _log.addHandler(handler)
+
     if "log_level" in args and args.log_level is not None:
         _log.setLevel(getattr(logging, args.log_level))
 
@@ -118,7 +207,7 @@ def main():
         else:
             raise ValueError("Command line must include either a path, a URL, or a Hugging Face model")
 
-        print_summary(args.globals, scan_result)
+        print_summary(args.globals, scan_result, style)
 
         if scan_result.scan_err:
             return 2
