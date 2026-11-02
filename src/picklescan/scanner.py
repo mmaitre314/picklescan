@@ -1,4 +1,3 @@
-from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 import http.client
@@ -359,18 +358,12 @@ def _http_get(url, max_bytes: Optional[int] = None, _redirects: int = 0) -> byte
 
 
 class _SkippedBytes:
-    """Stands in for a bytes argument too large to be a module or global name (tensor data, typically): only its size is kept.
-
-    Used as a STACK_GLOBAL operand it reads as "unknown", like any other non-string operand, so the import is reported as dangerous.
-    """
+    """Stands in for a bytes argument too large to be a module or global name (tensor data, typically): only its size is kept."""
 
     __slots__ = ("size",)
 
     def __init__(self, size: int):
         self.size = size
-
-    def __str__(self) -> str:
-        return "unknown"
 
     def __repr__(self) -> str:
         return f"<{self.size} bytes skipped>"
@@ -381,14 +374,14 @@ _max_kept_bytes_arg_size = 4096
 _skip_chunk_size = 1 << 20
 
 
-def _bytes_arg_reader(name: str, read_size, wrap=bytes):
+def _bytes_arg_reader(name: str, prefix_reader, prefix_size: int, wrap=bytes):
     def reader(f: IO[bytes]):
-        size = read_size(f)
+        size = prefix_reader(f)
         if size <= _max_kept_bytes_arg_size:
             data = f.read(size)
             if len(data) != size:
                 raise ValueError(f"expected {size} bytes in a {name}, but only {len(data)} remain")
-            return wrap(data)
+            return wrap(data), prefix_size + size
         # Read through in chunks rather than seeking, so a truncated argument is detected like pickletools does
         remaining = size
         while remaining > 0:
@@ -396,110 +389,379 @@ def _bytes_arg_reader(name: str, read_size, wrap=bytes):
             if not chunk:
                 raise ValueError(f"expected {size} bytes in a {name}, but only {size - remaining} remain")
             remaining -= len(chunk)
-        return _SkippedBytes(size)
+        return _SkippedBytes(size), prefix_size + size
 
     return reader
 
 
-_arg_readers = {
-    pickletools.bytes1: _bytes_arg_reader("bytes1", pickletools.read_uint1),
-    pickletools.bytes4: _bytes_arg_reader("bytes4", pickletools.read_uint4),
-    pickletools.bytes8: _bytes_arg_reader("bytes8", pickletools.read_uint8),
-    pickletools.bytearray8: _bytes_arg_reader("bytearray8", pickletools.read_uint8, bytearray),
+def _counted_arg_reader(name: str, prefix_reader, prefix_size: int, convert, truncated_message=None):
+    """Same checks and value as the pickletools reader for a length-prefixed argument, plus the number of bytes it took."""
+
+    def reader(f: IO[bytes]):
+        size = prefix_reader(f)
+        if size < 0:
+            raise ValueError(f"{name} byte count < 0: {size}")
+        data = f.read(size)
+        if len(data) != size:
+            raise ValueError(truncated_message or f"expected {size} bytes in a {name}, but only {len(data)} remain")
+        return convert(data), prefix_size + size
+
+    return reader
+
+
+def _utf8(data: bytes) -> str:
+    return str(data, "utf-8", "surrogatepass")
+
+
+def _latin1(data: bytes) -> str:
+    return data.decode("latin-1")
+
+
+# Readers returning (value, number of bytes read): counting is much cheaper than asking the stream for its position
+_counted_arg_readers = {
+    pickletools.bytes1: _bytes_arg_reader("bytes1", pickletools.read_uint1, 1),
+    pickletools.bytes4: _bytes_arg_reader("bytes4", pickletools.read_uint4, 4),
+    pickletools.bytes8: _bytes_arg_reader("bytes8", pickletools.read_uint8, 8),
+    pickletools.bytearray8: _bytes_arg_reader("bytearray8", pickletools.read_uint8, 8, bytearray),
+    pickletools.unicodestring1: _counted_arg_reader("unicodestring1", pickletools.read_uint1, 1, _utf8),
+    pickletools.unicodestring4: _counted_arg_reader("unicodestring4", pickletools.read_uint4, 4, _utf8),
+    pickletools.unicodestring8: _counted_arg_reader("unicodestring8", pickletools.read_uint8, 8, _utf8),
+    pickletools.string1: _counted_arg_reader("string1", pickletools.read_uint1, 1, _latin1),
+    pickletools.string4: _counted_arg_reader("string4", pickletools.read_int4, 4, _latin1),
+    pickletools.long1: _counted_arg_reader(
+        "long1", pickletools.read_uint1, 1, pickletools.decode_long, "not enough data in stream to read long1"
+    ),
+    pickletools.long4: _counted_arg_reader(
+        "long4", pickletools.read_int4, 4, pickletools.decode_long, "not enough data in stream to read long4"
+    ),
 }
+# Opcode byte -> (opcode, plain reader or None, counted reader or None, fixed argument size or None)
+_opcode_table = {}
+for _op in pickletools.opcodes:
+    _arg = _op.arg
+    if _arg is None:
+        _opcode_table[_op.code.encode("latin-1")] = (_op, None, None, 0)
+    elif _arg in _counted_arg_readers:
+        _opcode_table[_op.code.encode("latin-1")] = (_op, None, _counted_arg_readers[_arg], None)
+    elif _arg.n >= 0:
+        _opcode_table[_op.code.encode("latin-1")] = (_op, _arg.reader, None, _arg.n)
+    else:  # newline-terminated arguments (protocol 0): their size is only known by asking the stream
+        _opcode_table[_op.code.encode("latin-1")] = (_op, _arg.reader, None, None)
 
 
-def _genops(data: IO[bytes]):
-    """pickletools.genops, except that large bytes arguments are skipped instead of read into memory.
+def _genops(data: IO[bytes], frame_violations: Optional[List[str]] = None):
+    """pickletools.genops, with two differences.
 
-    Model weights pickled in-band (numpy arrays, raw tensor bytes...) are a few opcodes carrying gigabytes of arguments.
+    Large bytes arguments are skipped instead of read into memory: model weights pickled in-band (numpy arrays, raw tensor bytes...)
+    are a few opcodes carrying gigabytes of arguments.
+
+    Framing is checked: pickletools reads opcodes sequentially and ignores FRAME, but CPython's C unpickler does not. When an
+    opcode runs past the end of the current frame, the C unpickler (reading from a file object such as io.BytesIO, which is how
+    torch.load reads data.pkl) drops what is left of the frame and reads the argument from after it, so it parses different opcodes
+    than pickletools does. Leftover frame bytes after STOP are likewise skipped by the next pickle.load on the same file. Pickles
+    written by pickle.dumps never do any of this, and the pure Python unpickler rejects them, so such violations are reported
+    in frame_violations rather than emulated.
     """
+    frame_end = None
+    pos = data.tell()
+    read = data.read
     while True:
-        pos = data.tell()
-        code = data.read(1)
-        opcode = pickletools.code2op.get(code.decode("latin-1"))
-        if opcode is None:
+        code = read(1)
+        entry = _opcode_table.get(code)
+        if entry is None:
             if code == b"":
                 raise ValueError("pickle exhausted before seeing STOP")
             raise ValueError(f"at position {pos}, opcode {code!r} unknown")
-        arg = None if opcode.arg is None else _arg_readers.get(opcode.arg, opcode.arg.reader)(data)
+        opcode, reader, counted_reader, size = entry
+        if counted_reader is not None:
+            arg, size = counted_reader(data)
+            end_pos = pos + 1 + size
+        elif reader is None:
+            arg = None
+            end_pos = pos + 1
+        else:
+            arg = reader(data)
+            end_pos = pos + 1 + size if size is not None else data.tell()
+
+        if frame_end is not None:
+            if pos >= frame_end:
+                frame_end = None  # the current frame has been fully consumed
+            elif frame_violations is not None:
+                if end_pos > frame_end:
+                    frame_violations.append(f"{opcode.name} at position {pos} runs past the end of the frame at position {frame_end}")
+                elif code == b"\x95":
+                    frame_violations.append(f"FRAME at position {pos} starts before the end of the frame at position {frame_end}")
+                elif code == b"." and end_pos < frame_end:
+                    frame_violations.append(f"STOP at position {pos} leaves the frame ending at position {frame_end} unfinished")
+        if code == b"\x95":
+            frame_end = end_pos + arg
+
         yield opcode, arg, pos
         if code == b".":
             break
+        pos = end_pos
 
 
 _memo_put_ops = {"MEMOIZE", "PUT", "BINPUT", "LONG_BINPUT"}
 _memo_get_ops = {"GET", "BINGET", "LONG_BINGET"}
 _string_ops = {"SHORT_BINUNICODE", "UNICODE", "BINUNICODE", "BINUNICODE8", "STRING", "BINSTRING", "SHORT_BINSTRING"}
+# Value of a stack or memo slot that is not a string known statically. Used as a STACK_GLOBAL operand, the import is reported as
+# dangerous (see _build_scan_result_from_raw_globals).
+_unknown = "unknown"
+_not_string = object()  # value certainly not a string (number, container, bytes...)
+_mark = object()  # MARK on the stack
+# Types of values pushed by opcodes (pickletools metadata) that are certainly not strings
+_not_string_types = {"None", "bool", "int", "int_or_bool", "float", "bytes", "bytearray", "tuple", "list", "dict", "set", "frozenset",
+                     "buffer"}  # fmt: skip
+# Reported, as a dangerous global, for pickles whose framing makes the C unpickler and pickletools parse different opcodes
+_frame_violation_global = (_unknown, "pickle frame boundary violation")
+_joblib_wrapper_globals = {("joblib.numpy_pickle", "NumpyArrayWrapper"), ("sklearn.externals.joblib.numpy_pickle", "NumpyArrayWrapper")}
 
 
-def _stack_global_operand(op_name: str, op_value, memo: dict, pos) -> str:
-    if op_name in _memo_get_ops:
-        try:
-            memo_key = int(op_value)
-        except (ValueError, TypeError, IndexError) as e:
-            _log.debug(f"Invalid memo key at position {pos}: (error: {e}), treating as unknown")
-            return "unknown"
-        if memo_key not in memo:
-            _log.debug(f"Memo key {memo_key} not found at position {pos}, treating as unknown (potential evasion attempt)")
-            return "unknown"
-        memo_value = memo[memo_key]
-        # Normalize memo value to string to prevent type confusion
-        if not isinstance(memo_value, str):
-            _log.debug(f"Memo value at position {pos} is not a string (type: {type(memo_value).__name__}), casting to string")
-            memo_value = str(memo_value)
-        return memo_value
-    if op_name not in _string_ops:
-        _log.debug("Presence of non-string opcode, categorizing as an unknown dangerous import")
-        return "unknown"
-    return op_value
+class _KnownImport(tuple):
+    """An import known to be a class or a function (not a string): what it returns when called is not a string either."""
+
+    __slots__ = ()
+
+
+def _import_value(imported: Tuple[str, str], trusted: bool = True):
+    """Value pushed by an import: other imports than safe classes and functions can be strings (os.sep is one), and so can safe
+    ones once the pickle has run code that could replace module attributes (trusted=False, see _Reading)."""
+    module, name = imported
+    safe = _safe_globals.get(module)
+    if trusted and ((safe is not None and name in safe) or imported in _joblib_wrapper_globals):
+        return _KnownImport(imported)
+    return _unknown
+
+
+class _Globals(set):
+    """Imports found, plus those found only by alternative readings (reported only when dangerous, see _list_globals)."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.alternative = set()
+
+
+class _Reading:
+    """One way the unpickler can read the pickle: its stack and memo, as far as they can be told without loading anything. Values
+    are strings known statically, _not_string, _KnownImport, _unknown, or _mark.
+
+    Where the unpickler would fail (stack underflow, missing memo slot...), the reading goes on with _unknown values rather than
+    stop: imports found after such a point are reported too, erring on the side of reporting.
+
+    Safe imports are known not to be strings only while the pickle has called nothing but safe classes and functions, and only
+    given state (BUILD) to what they returned: anything else can replace module or class attributes (BUILD on a module or a class,
+    setattr...), after which a safe import, or calling one, can return a string."""
+
+    __slots__ = ("stack", "memo", "trusted")
+
+    def __init__(self):
+        self.stack = []
+        self.memo = {}
+        self.trusted = True
+
+    def copy(self) -> "_Reading":
+        reading = _Reading()
+        reading.stack, reading.memo, reading.trusted = list(self.stack), dict(self.memo), self.trusted
+        return reading
+
+    def distrust(self):
+        self.trusted = False
+        self.stack[:] = [_unknown if isinstance(v, _KnownImport) else v for v in self.stack]
+        self.memo.update((k, _unknown) for k, v in self.memo.items() if isinstance(v, _KnownImport))
+
+    def pop(self):
+        if not self.stack or self.stack[-1] is _mark:
+            return _unknown  # stack underflow, or popping past a MARK
+        return self.stack.pop()
+
+    def pop_mark(self) -> list:
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i] is _mark:
+                items = self.stack[i + 1 :]
+                del self.stack[i:]
+                return items
+        items = self.stack[:]  # no MARK
+        self.stack.clear()
+        return items
+
+    def apply(self, op, arg, pos) -> Optional[Tuple[str, str]]:
+        """Applies an opcode. Returns what STACK_GLOBAL imports, if it is one the unpickler would run."""
+        name, stack = op.name, self.stack
+        effect = _opcode_effects.get(name)
+        if effect is not None:
+            pops_mark, pops, pushes = effect
+            if pops_mark:
+                self.pop_mark()
+            if pops:
+                if name in _item_ops and self.trusted and (len(stack) < pops or stack[-pops] is not _not_string):
+                    self.distrust()  # adding items calls methods (extend, __setitem__...) of something that may not be a container
+                if len(stack) >= pops and _mark not in stack[-pops:]:
+                    del stack[-pops:]
+                else:
+                    for _ in range(pops):
+                        self.pop()
+            stack.extend(pushes)
+            return None
+        if name == "MEMOIZE":
+            self.memo[len(self.memo)] = stack[-1] if stack and stack[-1] is not _mark else _unknown
+            return None
+        if name in _memo_get_ops:
+            key = _memo_key(arg, pos)
+            if key not in self.memo:
+                _log.debug(f"Memo key {key} not found at position {pos}, treating as unknown (potential evasion attempt)")
+            stack.append(self.memo.get(key, _unknown))
+            return None
+        if name in _string_ops:
+            stack.append(arg if isinstance(arg, str) else _unknown)
+            return None
+        if name == "MARK":
+            stack.append(_mark)
+            return None
+        if name in _memo_put_ops:
+            self.memo[_memo_key(arg, pos)] = stack[-1] if stack and stack[-1] is not _mark else _unknown
+            return None
+        if name == "DUP":
+            stack.append(stack[-1] if stack and stack[-1] is not _mark else self.pop())
+            return None
+        if name == "BUILD":
+            self.pop()
+            if self.trusted and (not stack or stack[-1] is not _not_string):
+                self.distrust()  # state given to something that may be a module or a class
+            return None  # the object stays on the stack
+        if name == "STACK_GLOBAL":
+            if len(stack) < 2 or stack[-1] is _mark or stack[-2] is _mark:
+                self.pop()
+                self.pop()
+                stack.append(_unknown)
+                return None  # not two operands: the unpickler fails here, nothing is imported
+            global_name, module = self.pop(), self.pop()
+            if any(v is _not_string or isinstance(v, _KnownImport) for v in (module, global_name)):
+                stack.append(_unknown)
+                return None  # "STACK_GLOBAL requires str": the unpickler fails here, nothing is imported
+            imported = (module if isinstance(module, str) else _unknown, global_name if isinstance(global_name, str) else _unknown)
+            stack.append(_import_value(imported, self.trusted))
+            return imported
+        if name == "GLOBAL":
+            stack.append(_import_value(tuple(arg.split(" ", 1)), self.trusted))
+            return None
+        if name in ("EXT1", "EXT2", "EXT4"):
+            if self.trusted:
+                self.distrust()  # imports whatever the copyreg extension registry maps the code to
+            stack.append(_unknown)
+            return None
+        # REDUCE, NEWOBJ, NEWOBJ_EX, OBJ, INST: calling a safe class or function does not return a string
+        if name == "OBJ":
+            items = self.pop_mark()
+            callable_value = items[0] if items else _unknown
+        elif name == "INST":
+            self.pop_mark()
+            callable_value = _import_value(tuple(arg.split(" ", 1)), self.trusted)
+        else:
+            for _ in range(1 if name != "NEWOBJ_EX" else 2):
+                self.pop()
+            callable_value = self.pop()
+        if self.trusted and not isinstance(callable_value, _KnownImport):
+            self.distrust()  # calling something unknown can replace module or class attributes
+        stack.append(_not_string if isinstance(callable_value, _KnownImport) else _unknown)
+        return None
+
+
+# Opcodes that add items to the object below them, calling its methods
+_item_ops = {"APPEND", "APPENDS", "SETITEM", "SETITEMS", "ADDITEMS"}
+# Opcodes _Reading.apply handles specifically
+_reading_ops = (
+    {"MEMOIZE", "MARK", "DUP", "BUILD", "STACK_GLOBAL", "GLOBAL", "EXT1", "EXT2", "EXT4", "REDUCE", "NEWOBJ", "NEWOBJ_EX", "OBJ", "INST"}
+    | _memo_put_ops
+    | _memo_get_ops
+    | _string_ops
+)
+
+
+def _opcode_effect(op) -> Tuple[bool, int, tuple]:
+    """Effect on the stack of an opcode, from pickletools' description of it: whether it pops down to a MARK, how many values it
+    pops (below the MARK if any), and the values it pushes."""
+    before = op.stack_before
+    pops_mark = pickletools.markobject in before
+    pops = before.index(pickletools.markobject) if pops_mark else len(before)
+    return pops_mark, pops, tuple(_not_string if pushed.name in _not_string_types else _unknown for pushed in op.stack_after)
+
+
+_opcode_effects = {op.name: _opcode_effect(op) for op in pickletools.opcodes if op.name not in _reading_ops}
+
+
+def _memo_key(op_value, pos):
+    try:
+        return int(op_value)
+    except (ValueError, TypeError) as e:
+        _log.debug(f"Invalid memo key at position {pos}: (error: {e}), treating as unknown")
+        return None
 
 
 def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]]:
-    globals = set()
+    """Imports made by the pickles in data.
 
-    memo = {}
+    The unpickler's stack and memo are modeled (_Reading) to know what STACK_GLOBAL imports. Two readings are followed:
+    - each pickle has a stack and memo of its own, as for pickle.load (a PROTO in the middle of a pickle is a no-op, as for the
+      C unpickler),
+    - a PROTO in the middle of a pickle starts a pickle embedded in it, with a stack and memo of its own, after which the enclosing
+      pickle resumes: joblib writes object arrays this way, and reads them with an Unpickler of their own.
+    The first reading is what pickle.load does, so it is reported; the second one is a guess anyone can trigger by writing a PROTO,
+    so imports found by it only are reported when dangerous. GLOBAL and INST imports are reported whatever the reading.
+    """
+    globals = _Globals()
+    resumed = None  # second reading of the pickle resuming after an embedded one
+    enclosing = []  # second reading: readings of the pickles embedded ones are in
     # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
     last_byte = b"dummy"
     parsing_pkl_error = None
     malformed_pkl_error = None
     while last_byte != b"":
-        # Opcodes are processed as they are parsed rather than collected first: their arguments can hold the model weights.
-        # STACK_GLOBAL only needs the two latest opcodes that push a value (memo writes push nothing), so only those are kept.
-        previous_op = None
-        value_ops = deque(maxlen=2)
+        # Opcodes are processed as they are parsed rather than collected first: their arguments can hold the model weights
+        reading = _Reading()
+        nested = resumed  # the second reading, once it differs from the first one
+        resumed = None
         stack_global_underflow = None
+        frame_violations = []
+        first_op = True
         try:
-            for op, op_value, pos in _genops(data):
+            for op, op_value, pos in _genops(data, frame_violations):
                 op_name = op.name
-                if op_name == "MEMOIZE":
-                    if previous_op is not None:
-                        memo[len(memo)] = previous_op[1]
-                elif op_name in ("PUT", "BINPUT", "LONG_BINPUT"):
-                    if previous_op is not None:
-                        memo[op_value] = previous_op[1]
-                elif op_name in ("GLOBAL", "INST"):
+                if op_name in ("GLOBAL", "INST"):
                     globals.add(tuple(op_value.split(" ", 1)))
-                elif op_name == "STACK_GLOBAL":
-                    # Operands are resolved now, against the memo as it is when STACK_GLOBAL runs
-                    values = [_stack_global_operand(name, value, memo, value_pos) for name, value, value_pos in reversed(value_ops)]
-                    if len(values) == 2:
-                        globals.add((values[1], values[0]))
-                    elif stack_global_underflow is None:
-                        stack_global_underflow = f"Found {len(values)} values for STACK_GLOBAL at position {pos} instead of 2."
-
-                if op_name not in _memo_put_ops:
-                    value_ops.append((op_name, op_value, pos))
-                previous_op = (op_name, op_value)
+                elif op_name == "PROTO" and not first_op:
+                    enclosing.append(nested if nested is not None else reading.copy())
+                    nested = _Reading()
+                first_op = False
+                if op_name == "STACK_GLOBAL" and stack_global_underflow is None:
+                    top = reading.stack[-2:]
+                    operands = top[::-1].index(_mark) if _mark in top else len(top)  # values above the nearest MARK
+                    if operands < 2:
+                        stack_global_underflow = f"Found {operands} values for STACK_GLOBAL at position {pos} instead of 2."
+                imported = reading.apply(op, op_value, pos)
+                if imported is not None:
+                    globals.add(imported)
+                if nested is not None:
+                    imported = nested.apply(op, op_value, pos)
+                    if imported is not None:
+                        globals.alternative.add(imported)
         except Exception as e:
             _log.debug(f"Error parsing pickle: {e}", exc_info=True)
             parsing_pkl_error = str(e)
         else:
+            if enclosing:
+                resumed = enclosing.pop()  # second reading: the embedded pickle is done, the enclosing one resumes
             # The unpickler rejects a STACK_GLOBAL with too few operands, so this pickle cannot load. Only report it when the rest
             # of the pickle parsed fine: random binary data trips over this regularly before hitting an invalid opcode, and should
             # keep being reported as "not a pickle" rather than as a scan error.
             if stack_global_underflow is not None and malformed_pkl_error is None:
                 malformed_pkl_error = stack_global_underflow
+        if frame_violations:
+            # Reported even if pickletools later fails to parse this pickle: the C unpickler may well parse it differently
+            _log.debug(f"Pickle frame violation: {frame_violations[0]}")
+            globals.add(_frame_violation_global)
+            if malformed_pkl_error is None:
+                malformed_pkl_error = frame_violations[0]
         last_byte = data.read(1)
         if last_byte != b"":
             # Rewind the peeked byte so the next genops pass starts on it
@@ -514,7 +776,8 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
             # Additionally, we return the error at the end of the loop to scan imports in partially broken files,
             # which can unpickle and be dangerous regardless of being valid pickle.
             # A pickle known to be malformed is reported with its (possibly empty) globals rather than as "not a pickle" (None).
-            globals_opt = globals if len(globals) > 0 or malformed_pkl_error is not None else None
+            found = len(globals) > 0 or len(globals.alternative) > 0
+            globals_opt = globals if found or malformed_pkl_error is not None else None
             raise GenOpsError(parsing_pkl_error, globals_opt)
 
     if malformed_pkl_error is not None:
@@ -532,7 +795,8 @@ def _build_scan_result_from_raw_globals(
     globals = []
     suspicious_count = 0
     issues_count = 0
-    for rg in raw_globals:
+    alternative = set(getattr(raw_globals, "alternative", ())) - set(raw_globals)
+    for rg in list(raw_globals) + sorted(alternative):
         g = Global(rg[0], rg[1], SafetyLevel.Dangerous)
         safe_filter = _safe_globals.get(g.module)
         unsafe_filter = _unsafe_globals.get(g.module)
@@ -569,6 +833,10 @@ def _build_scan_result_from_raw_globals(
         else:
             g.safety = SafetyLevel.Suspicious
             suspicious_count += 1
+        if rg in alternative and g.safety is not SafetyLevel.Dangerous:
+            if g.safety is SafetyLevel.Suspicious:
+                suspicious_count -= 1
+            continue  # found by an alternative reading only: reported when dangerous
         globals.append(g)
 
     return ScanResult(globals, 1, issues_count, 1 if issues_count > 0 else 0, scan_err, suspicious_count)
