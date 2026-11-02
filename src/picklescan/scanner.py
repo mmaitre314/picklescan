@@ -265,9 +265,14 @@ class _ScanContext:
             raise _LimitExceeded(f"more than {self.limits.max_archive_members} archive members (ScanLimits.max_archive_members)")
 
 
+# Marks log records about errors and skipped content, which are also in the scan result: the command line prints those from the
+# result instead (see cli), so that each is shown once
+_reported = {"picklescan_reported": True}
+
+
 def _error_result(file_id, kind: ScanErrorKind, message: str, scanned_files: int = 1, offset: Optional[int] = None) -> ScanResult:
     level = logging.WARNING if kind in (ScanErrorKind.MISSING_DEPENDENCY, ScanErrorKind.UNSUPPORTED) else logging.ERROR
-    _log.log(level, f"{_location(file_id).describe()}: {kind.value} error: {message}")
+    _log.log(level, f"{_location(file_id).describe()}: {kind.value} error: {message}", extra=_reported)
     return ScanResult([], scanned_files=scanned_files).add_error(file_id, kind, message, offset)
 
 
@@ -810,18 +815,21 @@ def _read_line(f: IO[bytes]) -> Tuple[Optional[bytes], int]:
 
 
 def _read_number_line(f: IO[bytes]) -> Tuple[Optional[bytes], int]:
-    """A line holding a number, without its leading whitespace, or None when what is left is longer than _max_kept_number_size
-    (whitespace aside), and the bytes read. The unpicklers ignore whitespace around numbers, so it can make a line of any length.
+    """A number on a line, as the C unpickler reads it, and the bytes read: the line ends at its first NUL byte (it is read as a C
+    string), and the leading whitespace the unpicklers ignore is left out. None when what is left is longer than
+    _max_kept_number_size (whitespace aside): whitespace and what follows a NUL byte can make a line of any length.
     """
-    kept, consumed, too_long = b"", 0, False
+    kept, consumed, too_long, ended = b"", 0, False, False
     while True:
         chunk = f.readline(_skip_chunk_size)
         if not chunk:
             raise ValueError("no newline found when trying to read a line argument")
         consumed += len(chunk)
         end = chunk.endswith(b"\n")
-        if not too_long:
+        if not too_long and not ended:
             body = chunk[:-1] if end else chunk
+            if b"\0" in body:
+                body, ended = body.split(b"\0", 1)[0], True
             kept += body.lstrip() if not kept else body
             if len(kept) > _max_kept_number_size:
                 core = kept.rstrip()
@@ -829,17 +837,41 @@ def _read_number_line(f: IO[bytes]) -> Tuple[Optional[bytes], int]:
                 kept = core + b" " if len(core) < len(kept) else core
                 too_long = len(core) > _max_kept_number_size
         if end:
-            return (None if too_long else kept + b"\n"), consumed
+            return (None if too_long else kept), consumed
 
 
-def _number_line_arg_reader(read_from_line):
-    """The pickletools reader for a number on a line (protocol 0), fed the number without the whitespace around it."""
+def _parse_int_line(text: bytes):
+    """INT, PUT and GET arguments, accepted as soon as a CPython unpickler accepts them: the C unpickler parses INT like strtol
+    (base prefixes are accepted), PUT and GET in base 10, the Python unpickler with int(..., 0)."""
+    if text in (b"00", b"01"):
+        return text == b"01"
+    for base in (10, 0):
+        try:
+            return int(text, base)
+        except ValueError:
+            pass
+    raise ValueError(f"invalid literal for an integer argument: {text!r}")
+
+
+def _parse_long_line(text: bytes) -> int:
+    text = text.strip()
+    for base in (10, 0):
+        try:
+            return int(text[:-1] if text.endswith(b"L") else text, base)
+        except ValueError:
+            pass
+    raise ValueError(f"invalid literal for a LONG argument: {text!r}")
+
+
+def _number_line_arg_reader(parse):
+    """The reader of a number on a line (protocol 0: INT, LONG, FLOAT, PUT, GET), accepting what any CPython unpickler accepts.
+    pickletools is stricter: rejecting what an unpickler accepts would stop parsing where loading goes on."""
 
     def reader(f: IO[bytes]):
-        line, consumed = _read_number_line(f)
-        if line is None:
+        text, consumed = _read_number_line(f)
+        if text is None:
             return _SkippedBytes(consumed), consumed
-        return read_from_line(io.BytesIO(line)), consumed
+        return parse(text), consumed
 
     return reader
 
@@ -889,9 +921,9 @@ _counted_arg_readers = {
     pickletools.stringnl_noescape: _line_arg_reader(pickletools.read_stringnl_noescape),
     pickletools.stringnl_noescape_pair: _line_arg_reader(pickletools.read_stringnl_noescape_pair, line_count=2),
     pickletools.unicodestringnl: _line_arg_reader(pickletools.read_unicodestringnl),
-    pickletools.decimalnl_short: _number_line_arg_reader(pickletools.read_decimalnl_short),
-    pickletools.decimalnl_long: _number_line_arg_reader(pickletools.read_decimalnl_long),
-    pickletools.floatnl: _number_line_arg_reader(pickletools.read_floatnl),
+    pickletools.decimalnl_short: _number_line_arg_reader(_parse_int_line),
+    pickletools.decimalnl_long: _number_line_arg_reader(_parse_long_line),
+    pickletools.floatnl: _number_line_arg_reader(lambda text: float(text.strip())),
 }
 # Opcode byte -> (opcode, plain reader or None, counted reader or None, fixed argument size or None)
 _opcode_table = {}
@@ -1721,7 +1753,9 @@ def scan_pickle_bytes(data: IO[bytes], file_id, multiple_pickles=True, strict=Fa
             e.globals = kept or None
         if e.globals is not None:
             # Found some globals before error - could be a malicious partial pickle
-            _log.error(f"{_location(file_id).describe()}: error parsing pickle: {e}", exc_info=_log.isEnabledFor(logging.DEBUG))
+            _log.error(
+                f"{_location(file_id).describe()}: error parsing pickle: {e}", exc_info=_log.isEnabledFor(logging.DEBUG), extra=_reported
+            )
             result = _build_scan_result_from_raw_globals(e.globals, file_id, strict=strict)
             return result.add_error(file_id, ScanErrorKind.PARSE, str(e), e.offset)
         else:
@@ -2221,7 +2255,7 @@ def _walk_archive(data, info: FileInfo, ctx: _ScanContext, depth: int, walk_memb
     if depth >= ctx.limits.max_archive_depth + extra_level:
         info.note = f"{info.format.value} archive nested in another archive: not opened (ScanLimits.max_archive_depth)"
         if ctx.scan:
-            _log.info(f"{info.location.describe()}: {info.note}")
+            _log.info(f"{info.location.describe()}: {info.note}", extra=_reported)
             ctx.result.skipped.append(SkippedFile(info.location, info.note))
         return info
     walk_members(data, info, ctx, depth + 1)
