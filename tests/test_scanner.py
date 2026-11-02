@@ -31,6 +31,8 @@ from picklescan.scanner import (
     ScanErrorKind,
     ScanLimits,
     ScanResult,
+    Severity,
+    Verdict,
     _http_get,
     _list_globals,
     _build_scan_result_from_raw_globals,
@@ -138,6 +140,12 @@ class MockHTTPSConnection:
         sniffing_prefix = "GET https://huggingface.co/mock/sniffing-model/resolve/main/"
         if target.startswith(sniffing_prefix):
             self.response = HTTPResponse(200, _sniffing_repo_files[target[len(sniffing_prefix) :]])
+        elif target == "GET https://huggingface.co/api/models/mock/broken-repo":
+            self.response = HTTPResponse(200, json.dumps({"siblings": [{"rfilename": "ok.pkl"}, {"rfilename": "gone.pkl"}]}).encode())
+        elif target == "GET https://huggingface.co/mock/broken-repo/resolve/main/ok.pkl":
+            self.response = HTTPResponse(200, pickle.dumps(Malicious1()))
+        elif target == "GET https://huggingface.co/mock/broken-repo/resolve/main/gone.pkl":
+            self.response = HTTPResponse(404)
         elif target == "GET https://huggingface.co/api/models/mock/sniffing-model":
             siblings = [{"rfilename": name} for name in _sniffing_repo_files]
             self.response = HTTPResponse(200, json.dumps({"siblings": siblings}).encode())
@@ -1367,14 +1375,14 @@ def test_missing_py7zr_is_an_error_not_an_exception(monkeypatch):
 def test_scan_directory_path_isolates_failures(tmp_path, monkeypatch):
     (tmp_path / "a.pkl").write_bytes(pickle.dumps(Malicious1()))
     (tmp_path / "b.pkl").write_bytes(pickle.dumps({"benign": True}))
-    original = scanner_module.scan_bytes
+    original = scanner_module._scan
 
-    def flaky_scan_bytes(data, file_id, *args, **kwargs):
-        if file_id.endswith("b.pkl"):
+    def flaky_scan(data, file_id, *args, **kwargs):
+        if str(file_id).endswith("b.pkl"):
             raise RuntimeError("boom")
         return original(data, file_id, *args, **kwargs)
 
-    monkeypatch.setattr(scanner_module, "scan_bytes", flaky_scan_bytes)
+    monkeypatch.setattr(scanner_module, "_scan", flaky_scan)
     result = scan_directory_path(str(tmp_path))
     assert result.issues_count == 1  # a.pkl was still scanned
     assert _error_kinds(result) == [ScanErrorKind.INTERNAL]
@@ -1938,7 +1946,7 @@ def test_scan_huggingface_model_by_content():
     _served_bytes.clear()
     result = scan_huggingface_model("mock/sniffing-model")
     evals = [Global("builtins", "eval", SafetyLevel.Dangerous)] * 2 + [Global("__builtin__", "eval", SafetyLevel.Dangerous)]
-    compare_scan_results(result, ScanResult(evals, 5, 3, 3))
+    compare_scan_results(result, ScanResult(evals, 4, 3, 3))  # README.md: text, not parsed
     # every file is scanned by content, but only what the scan reads is downloaded: not the 20 MB of the safetensors file
     assert set(_served_bytes) == set(_sniffing_repo_files)
     assert _served_bytes["model.safetensors"] <= 2 << 20
@@ -1956,7 +1964,7 @@ def test_scan_directory_path_by_content(tmp_path):
         Global("numpy", "dtype", SafetyLevel.Innocuous),
     ]
     evals = [Global("builtins", "eval", SafetyLevel.Dangerous)] * 2 + [Global("__builtin__", "eval", SafetyLevel.Dangerous)]
-    compare_scan_results(scan_directory_path(str(tmp_path)), ScanResult(evals + numpy_globals * 2, 7, 3, 3))
+    compare_scan_results(scan_directory_path(str(tmp_path)), ScanResult(evals + numpy_globals * 2, 6, 3, 3))  # README.md: text
 
 
 def test_scan_url_reads_only_what_it_needs():
@@ -1971,7 +1979,7 @@ def test_text_is_not_reported_as_pickle(tmp_path):
     (tmp_path / "modeling.py").write_bytes(b"import os\nimport sys\n\nclass Model:\n    pass\n")
     (tmp_path / "LICENSE").write_bytes(b"copyright 2024 someone\nall rights reserved\n")
     result = scan_directory_path(str(tmp_path))
-    compare_scan_results(result, ScanResult([], 2, 0, 0))
+    compare_scan_results(result, ScanResult([], 0, 0, 0))
     # ... while a protocol 0 pickle cut short still is: the unpickler runs what comes before the point where it fails
     (tmp_path / "weights").write_bytes(pickle.dumps(Malicious1(), protocol=0)[:-1] + b"\xff")
     result = scan_directory_path(str(tmp_path))
@@ -1999,16 +2007,25 @@ def test_cli_escapes_what_files_contain(tmp_path):
 
     # names from the scanned file can hold escape sequences and newlines: they must not reach the terminal as such
     path = tmp_path / "escapes.pkl"
-    path.write_bytes(b"cos\x1b[2J\nsystem\x07\n.")
+    path.write_bytes(b"cos\x1b[2J\nsystem\x07" + "\u202e".encode() + b"\n.")
     env = {k: v for k, v in os.environ.items() if k not in ("NO_COLOR", "FORCE_COLOR")}
     for color in ("always", "never"):
         command = [sys.executable, "-m", "picklescan", "-p", str(path), "-g", "--color", color]
         output = subprocess.run(command, capture_output=True, text=True, env=env).stdout
-        assert "\x1b[2J" not in output and "\\x1b[2J" in output and "\x07" not in output and "\\x07" in output, output
+        assert (
+            "\x1b[2J" not in output and "\\x1b[2J" in output and "\x07" not in output and "\\x07" in output and "\u202e" not in output
+        ), output
     # dangerous findings are colored from the log record, not from what the message says
     command = [sys.executable, "-m", "picklescan", "-p", f"{_root_path}/data/malicious1_v4.pkl", "--color", "always"]
     output = subprocess.run(command, capture_output=True, text=True, env=env).stdout
     assert output.startswith("\x1b[31m") and "dangerous import" in output.splitlines()[0], output
+
+
+def test_global_names_are_utf8():
+    # the unpicklers decode GLOBAL lines as UTF-8, whatever the Python version (pickletools only does from 3.12)
+    data = "cmodulé\nnamé\n0cos\nsystem\n.".encode()
+    result = scan_pickle_bytes(io.BytesIO(data), "utf8.pkl")
+    assert {(g.module, g.name) for g in result.globals} == {("modulé", "namé"), ("os", "system")} and not result.scan_err
 
 
 def test_numeric_arguments_like_cpython():
@@ -2049,6 +2066,141 @@ def test_cli_prints_each_error_once(tmp_path):
         [sys.executable, "-m", "picklescan", "-p", str(path), "--color", "never"], capture_output=True, text=True
     ).stdout
     assert output.count("unknown opcode") == 1 and "error[parse]" in output
+
+
+def test_cli_groups_globals_by_file_and_member():
+    from picklescan.cli import format_globals
+
+    inner = _zip_bytes([("deep.pkl", pickle.dumps(Malicious1()))])
+    outer = _zip_bytes([("model/a.pkl", pickle.dumps([Malicious1(), collections.Counter()])), ("inner.zip", inner)])
+    result = scan_bytes(io.BytesIO(outer), "model.zip", limits=ScanLimits(max_archive_depth=2))
+    assert format_globals(result.globals) == [
+        "  model.zip",
+        "    model/a.pkl",
+        "      dangerous  builtins.eval",
+        "      suspicious collections.Counter",
+        "    inner.zip > deep.pkl",
+        "      dangerous  builtins.eval",
+    ]
+
+
+def test_content_without_magic_that_fails_to_parse(tmp_path):
+    # A file scanned on its own is parsed whatever its name. Without pickle magic bytes, content that fails to parse is most
+    # likely not a pickle (text reads as a few opcodes first): only what would be dangerous is reported, with the error
+    path = tmp_path / "script.py"
+    path.write_bytes(b"cmport os\nimport sys\n\xff")
+    compare_scan_results(scan_file_path(str(path)), ScanResult([], 1, 0, 0))
+    result = scan_file_path(str(path), strict=True)  # suspicious imports are promoted to dangerous
+    assert [(g.module, g.name) for g in result.globals] == [("mport os", "import sys")]
+    assert _error_kinds(result) == [ScanErrorKind.PARSE]
+    path.write_bytes(b"cos\nsystem\n\xff")
+    result = scan_file_path(str(path))
+    assert [(g.module, g.name) for g in result.globals] == [("os", "system")] and _error_kinds(result) == [ScanErrorKind.PARSE]
+    # in a directory scan, a text file without pickle magic bytes is not parsed; one with them is
+    (tmp_path / "pickled.json").write_bytes(pickle.dumps(Malicious1()))
+    result = scan_directory_path(str(tmp_path))
+    assert _finds_eval(result) and result.scanned_files == 1
+
+
+def test_cli_json(tmp_path):
+    import subprocess
+
+    archive = tmp_path / "model.zip"
+    archive.write_bytes(_zip_bytes([("archive/data.pkl", pickle.dumps(Malicious1()) + b"\xff")]))
+    run = subprocess.run([sys.executable, "-m", "picklescan", "-p", str(archive), "--json"], capture_output=True, text=True)
+    assert run.returncode == 2
+    report = json.loads(run.stdout)
+    assert report["infected_files"] == 1 and "scan_error" not in report and report["verdict"] == "unsafe"
+    assert report["globals"] == [
+        {"module": "builtins", "name": "eval", "safety": "dangerous", "file": str(archive), "members": ["archive/data.pkl"]}
+    ]
+    (error,) = report["errors"]
+    assert (error["kind"], error["severity"], error["members"]) == ("parse", "error", ["archive/data.pkl"])
+    assert error["offset"] == len(pickle.dumps(Malicious1()))
+    clean = subprocess.run(
+        [sys.executable, "-m", "picklescan", "-p", f"{_root_path}/data/benign0_v4.pkl", "--json"], capture_output=True, text=True
+    )
+    assert json.loads(clean.stdout)["errors"] is None
+
+
+def test_cli_reports_paths_as_given():
+    import subprocess
+
+    run = subprocess.run(
+        [sys.executable, "-m", "picklescan", "-p", "malicious1.zip", "-g"], capture_output=True, text=True, cwd=f"{_root_path}/data"
+    )
+    assert "  malicious1.zip\n    data.pkl\n" in run.stdout and _root_path not in run.stdout
+
+
+def test_verdict():
+    assert scan_pickle_bytes(io.BytesIO(pickle.dumps({"a": 1})), "clean.pkl").verdict() is Verdict.SAFE
+    malicious = scan_pickle_bytes(io.BytesIO(pickle.dumps(Malicious1()) + b"\xff"), "malicious.pkl")
+    assert malicious.verdict() is Verdict.UNSAFE  # dangerous imports outweigh errors
+    # nothing dangerous found, but the pickle could not be checked to its end
+    truncated = scan_pickle_bytes(io.BytesIO(b"\x80\x04\x8c\x0bcollections\x8c\x0bOrderedDict\x93" + b"\xff"), "truncated.pkl")
+    assert truncated.verdict() is Verdict.UNVERIFIED
+    assert truncated.verdict(blocking=set()) is Verdict.SAFE  # the caller decides which kinds of errors block
+    # a format version NumPy cannot load either: a warning, not a blocking error
+    future = scan_bytes(io.BytesIO(b"\x93NUMPY\x09\x00" + b"\x00" * 64), "future.npy")
+    assert [e.severity for e in future.errors] == [Severity.WARNING] and future.verdict() is Verdict.SAFE and not future.scan_err
+    # a result marked incomplete without saying why (built by a caller) is not vouched for
+    assert ScanResult([], 1, scan_err=True).verdict() is Verdict.UNVERIFIED
+    assert future.errors[0].format().startswith("warning[unsupported]")
+    # archives nested in archives are not opened, and are no error
+    assert scan_bytes(io.BytesIO(_nested_zip(3)), "nested.zip").verdict() is Verdict.SAFE
+
+
+def test_read_errors_while_parsing(monkeypatch):
+    # Content too large to be read into memory first is parsed as it is decompressed: a read error is an archive error then too
+    monkeypatch.setattr(scanner_module, "_max_in_memory_pickle_member_size", 1000)
+    truncated = gzip.compress(pickle.dumps([Malicious1(), list(range(100_000))]))[:-2000]
+    result = scan_bytes(io.BytesIO(truncated), "model.pkl.gz")
+    assert _finds_eval(result) and ScanErrorKind.ARCHIVE in _error_kinds(result)
+    assert any(e.message.startswith("decompression failed while reading the opcode at position") for e in result.errors), result
+
+
+def test_legacy_pytorch_stops_at_read_errors(monkeypatch):
+    # torch.load reads its sequence of pickles from the file: past a read error, there is nothing more to read
+    monkeypatch.setattr(scanner_module, "_max_in_memory_pickle_member_size", 10)  # parsed as it is decompressed
+    legacy = b"".join(pickle.dumps(x, protocol=2) for x in (MAGIC_NUMBER, 1001, {}, Malicious1(), []))
+    result = scan_bytes(io.BytesIO(gzip.compress(legacy)[:-30]), "model.bin.gz")
+    assert len([e for e in result.errors if e.kind is ScanErrorKind.ARCHIVE]) == 1, result
+
+
+def test_read_errors():
+    # A compressed stream that ends early: an archive error, with what was found before (the unpickler runs that part)
+    truncated = gzip.compress(pickle.dumps([Malicious1(), list(range(100_000))]))[:-2000]
+    result = scan_bytes(io.BytesIO(truncated), "model.pkl.gz")
+    assert _finds_eval(result) and ScanErrorKind.ARCHIVE in _error_kinds(result)
+    assert any(e.message.startswith("cannot decompress gzip data") for e in result.errors)
+    # ... also when nothing was found yet: unreadable data is no sign that it is not a pickle
+    truncated = gzip.compress(pickle.dumps(list(range(100_000))))[:-2000]
+    result = scan_bytes(io.BytesIO(truncated), "model.pkl.gz")
+    assert result.globals == [] and _error_kinds(result) == [ScanErrorKind.ARCHIVE] and result.verdict() is Verdict.UNVERIFIED
+    # a tar archive cut short
+    tar = _tar_bytes([("a.pkl", pickle.dumps(1)), ("b.pkl", pickle.dumps(Malicious1()) * 2000)])
+    result = scan_bytes(io.BytesIO(tar[: len(tar) // 2]), "model.tar")
+    assert ScanErrorKind.ARCHIVE in _error_kinds(result)
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs file permissions to apply")
+def test_unreadable_file_is_an_io_error(tmp_path):
+    (tmp_path / "a.pkl").write_bytes(pickle.dumps(Malicious1()))
+    unreadable = tmp_path / "b.pkl"
+    unreadable.write_bytes(pickle.dumps(1))
+    unreadable.chmod(0)
+    try:
+        result = scan_directory_path(str(tmp_path))
+    finally:
+        unreadable.chmod(0o600)
+    assert _finds_eval(result) and _error_kinds(result) == [ScanErrorKind.IO]
+    assert result.errors[0].location.file == str(unreadable)
+
+
+def test_missing_remote_file_is_an_io_error():
+    result = scan_huggingface_model("mock/broken-repo")
+    assert _finds_eval(result) and _error_kinds(result) == [ScanErrorKind.IO]
+    assert result.errors[0].file_id.endswith("gone.pkl") and "HTTP 404" in result.errors[0].message
 
 
 def test_main():

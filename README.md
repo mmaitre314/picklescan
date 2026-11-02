@@ -56,8 +56,14 @@ Directories and Hugging Face repositories are scanned file by file, whatever the
 requests, so only the parts a scan needs are downloaded: a file that is not a pickle costs a few small requests (its start, and
 its end to look for a zip archive), not a download.
 
-Text often parses as a few pickle opcodes before failing (Python source, for instance): for content without pickle magic bytes
-that fails to parse, imports whose names Python could not import are not reported.
+Text often parses as a few pickle opcodes before failing (Python source, for instance). So that it is not reported as a broken
+pickle:
+- in directory and repository scans, text and source files (`.py`, `.json`, `README`...) are not parsed, unless they start with
+  pickle magic bytes. A file scanned on its own, or an archive member, is always parsed.
+- content without pickle magic bytes that fails to parse is reported only for the dangerous imports found before the failure
+  (suspicious ones too with `--strict`), along with the parse error. When there are none, it is not a pickle.
+
+Everything found in content with pickle magic bytes, or that parses to its end, is reported.
 
 ### What a clean result means
 
@@ -75,7 +81,10 @@ could be opened.
 The scanner exit status codes are (a-la [ClamAV](https://www.clamav.net/)):
 - `0`: scan did not find malware
 - `1`: scan found malware
-- `2`: scan failed (part of the content could not be scanned), whether or not it found malware
+- `2`: scan failed: part of the content could not be checked (errors, not warnings), whether or not it found malware
+
+The scan summary also gives a verdict: `unsafe` (dangerous imports found), `unverified` (nothing dangerous found, but part of the
+content could not be checked), or `safe`.
 
 ### Scan errors
 
@@ -89,8 +98,10 @@ skipped: zip archive nested in another archive: not opened (ScanLimits.max_archi
  --> model.zip (inner.zip)
 ```
 
-From Python, `ScanResult.errors` and `ScanResult.skipped` hold the same information (kind, location, offset, message), and each
-`Global` found has a `location` too.
+From Python, `ScanResult.errors` and `ScanResult.skipped` hold the same information (kind, severity, location, offset, message),
+and each `Global` found has a `location` too. `ScanResult.scan_err` is set when there are errors of severity `error`. `ScanResult.verdict()` gives the overall outcome; which kinds of errors leave a file
+unverified can be chosen with `verdict(blocking={...})` (by default, every kind of severity `error`). `picklescan --json` prints
+all of it as JSON.
 
 ### Limits
 

@@ -1,10 +1,11 @@
 import argparse
+import json
 import logging
 import os
 import re
 import sys
 
-from .scanner import ScanFilter, ScanResult, scan_directory_path, _printable
+from .scanner import ScanFilter, ScanResult, Severity, Verdict, scan_directory_path, _printable
 from .scanner import scan_file_path
 from .scanner import scan_url
 from .scanner import scan_huggingface_model
@@ -76,6 +77,7 @@ class _LogFormatter(logging.Formatter):
         return message
 
 
+_verdict_styles = {Verdict.SAFE: ("green", "bold"), Verdict.UNSAFE: ("red", "bold"), Verdict.UNVERIFIED: ("yellow", "bold")}
 _safety_styles = {"dangerous": ("red", "bold"), "suspicious": ("yellow",), "innocuous": ("dim",)}
 _summary = {"picklescan_summary": True}
 
@@ -94,6 +96,7 @@ def print_summary(show_globals: bool, sr: ScanResult, style: Style = Style(False
                 count("Dangerous globals", sr.issues_count, "red", "bold"),
                 count("Scan errors", len(sr.errors), "red"),
                 count("Not scanned", len(sr.skipped), "yellow"),
+                f"Verdict: {style(sr.verdict().value, *_verdict_styles[sr.verdict()])}",
             ]
         ),
         extra=_summary,
@@ -103,11 +106,63 @@ def print_summary(show_globals: bool, sr: ScanResult, style: Style = Style(False
     for skipped in sr.skipped:
         _log.info("\n" + skipped.format(style), extra=_summary)
     if show_globals and len(sr.globals) > 0:
-        _log.info("All globals found:")
-        for g in sr.globals:
-            where = f"{style(_printable(g.location.describe()), 'dim')}: " if g.location is not None else ""
-            name = _printable(f"{g.module}.{g.name}")
-            _log.info(f"  * {where}{name} - {style(g.safety.value, *_safety_styles[g.safety.value])}", extra=_summary)
+        _log.info("\nAll globals found:", extra=_summary)
+        for line in format_globals(sr.globals, style):
+            _log.info(line, extra=_summary)
+
+
+def result_to_json(sr: ScanResult) -> dict:
+    def where(location) -> dict:
+        return {"file": location.file, "members": list(location.members)} if location is not None else {"file": None, "members": []}
+
+    return {
+        "scanned_files": sr.scanned_files,
+        "infected_files": sr.infected_files,
+        "verdict": sr.verdict().value,
+        "dangerous_globals": sr.issues_count,
+        "suspicious_globals": sr.suspicious_count,
+        "globals": [{"module": g.module, "name": g.name, "safety": g.safety.value, **where(g.location)} for g in sr.globals],
+        # null when everything was scanned
+        "errors": [
+            {
+                "kind": e.kind.value,
+                "severity": e.severity.value,
+                "message": e.message,
+                "offset": e.offset,
+                "help": e.help,
+                **where(e.location),
+            }
+            for e in sr.errors
+        ]
+        or None,
+        "skipped": [{"reason": s.reason, **where(s.location)} for s in sr.skipped],
+    }
+
+
+_safety_order = {"dangerous": 0, "suspicious": 1, "innocuous": 2}
+
+
+def format_globals(globals, style: Style = Style(False)) -> list:
+    """Imports grouped by file, then by archive member, most dangerous first. What the scanned files hold is escaped."""
+    groups = {}  # file -> member path -> globals, in the order they were found
+    for g in globals:
+        file, members = (g.location.file, " > ".join(g.location.members)) if g.location is not None else ("(unknown location)", "")
+        file, members = _printable(file), _printable(members)
+        groups.setdefault(file, {}).setdefault(members, []).append(g)
+    lines = []
+    for file, by_member in groups.items():
+        lines.append(f"  {style(file, 'bold')}")
+        for members, found in by_member.items():
+            indent = "    "
+            if members:
+                lines.append(f"    {style(members, 'dim')}")
+                indent = "      "
+            for g in sorted(found, key=lambda g: _safety_order[g.safety.value]):
+                safety = g.safety.value
+                lines.append(
+                    f"{indent}{style(safety, *_safety_styles[safety])}{' ' * (10 - len(safety))} {_printable(f'{g.module}.{g.name}')}"
+                )
+    return lines
 
 
 def main():
@@ -124,6 +179,7 @@ def main():
         dest="huggingface_model",
     )
     parser.add_argument("-g", "--globals", help="list all globals found", action="store_true")
+    parser.add_argument("--json", help="print the scan result as JSON, and nothing else", action="store_true")
     parser.add_argument(
         "--color",
         choices=["auto", "always", "never"],
@@ -176,14 +232,17 @@ def main():
 
     args = parser.parse_args()
 
-    style = Style(color_enabled(args.color, sys.stdout))
-    handler = logging.StreamHandler(stream=sys.stdout)
+    style = Style(color_enabled(args.color, sys.stdout) and not args.json)
+    # With --json, stdout holds the JSON document only: messages go to stderr
+    handler = logging.StreamHandler(stream=sys.stderr if args.json else sys.stdout)
     handler.setFormatter(_LogFormatter(style))
     _log.addHandler(handler)
+    if args.json and args.log_level is None:
+        handler.setLevel(logging.CRITICAL)
 
     if "log_level" in args and args.log_level is not None:
         _log.setLevel(getattr(logging, args.log_level))
-    if _log.getEffectiveLevel() == logging.INFO:
+    if _log.getEffectiveLevel() == logging.INFO and not args.json:
         # Errors and skipped content are printed once, from the scan result, in the summary (printed at the INFO level)
         handler.addFilter(lambda record: not getattr(record, "picklescan_reported", False))
 
@@ -196,7 +255,7 @@ def main():
 
     try:
         if args.path is not None:
-            path = os.path.abspath(args.path)
+            path = args.path  # reported as given, like compilers and linters do
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Path {path} does not exist")
             if os.path.isdir(path):
@@ -210,13 +269,19 @@ def main():
         else:
             raise ValueError("Command line must include either a path, a URL, or a Hugging Face model")
 
-        print_summary(args.globals, scan_result, style)
+        if args.json:
+            print(json.dumps(result_to_json(scan_result), indent=2))
+        else:
+            print_summary(args.globals, scan_result, style)
 
-        if scan_result.scan_err:
+        # a-la ClamAV: a scan that could not check everything (blocking errors) fails, even when it found malware. Warnings don't.
+        if any(e.severity is Severity.ERROR for e in scan_result.errors):
             return 2
-        return 0 if scan_result.issues_count == 0 else 1
-    except Exception:
+        return 1 if scan_result.verdict() is Verdict.UNSAFE else 0
+    except Exception as e:
         _log.exception("Unhandled exception")
+        if args.json:
+            print(json.dumps({"fatal_error": f"{type(e).__name__}: {e}"}, indent=2))
         return 2
 
 
