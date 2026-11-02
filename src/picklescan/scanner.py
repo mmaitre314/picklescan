@@ -1,3 +1,4 @@
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 import http.client
@@ -12,6 +13,7 @@ from tempfile import TemporaryDirectory
 from typing import IO, List, Optional, Set, Tuple
 import urllib.parse
 import zipfile
+import zlib
 from .relaxed_zipfile import RelaxedZipFile
 
 from .torch import (
@@ -257,6 +259,15 @@ _zip_file_extensions = {".zip", ".npz", ".7z"}
 # Archives can contain archives (zip member disguised as .npy, 7z member disguised as .pkl, zip quines...). Each level recurses, so
 # cap the nesting to keep the scan bounded, and report anything deeper as a scan error rather than silently skipping it.
 _max_archive_depth = 8
+# Read buffer wrapped around zip members: pickletools reads opcode by opcode, and ZipExtFile.read has a high per-call cost
+_zip_member_buffer_size = 1 << 16
+# Pickle members up to this size are read into memory before parsing, which is about twice as fast as parsing from the zip stream.
+# Larger ones are parsed from the stream so that scanning a large pickle never holds all of it in memory.
+_max_in_memory_pickle_member_size = 64 << 20
+_zip_magic_bytes = (
+    b"PK\x03\x04",  # local file header, the first record of any non-empty zip
+    b"PK\x05\x06",  # end of central directory record, the only record of an empty zip
+)
 # Pickle files do not actually have magic bytes, but v2+ files
 # start with a PROTO (\x80) opcode followed by a byte with the protocol version
 _pickle_magic_bytes = {
@@ -268,6 +279,26 @@ _pickle_magic_bytes = {
     b"\x80\x05",
 }
 _numpy_magic_bytes = b"\x93NUMPY"
+_7z_magic_bytes = b"7z\xbc\xaf\x27\x1c"
+# Extensions scanned without looking at the content first
+_scanned_file_extensions = _zip_file_extensions | _pickle_file_extensions | _pytorch_file_extensions | _numpy_file_extensions
+# Number of leading bytes read to decide whether a file is worth scanning
+_probe_size = 16
+
+
+def _should_scan(head: bytes, file_ext: Optional[str]) -> bool:
+    """Decides from a file's extension and first bytes whether a directory or Hugging Face scan should scan it.
+
+    Files with a known extension are always scanned. Others are scanned when their content looks like a format we can scan.
+    Protocol 0 and 1 pickles have no magic bytes, so they are only picked up through their extension.
+    """
+    if file_ext in _scanned_file_extensions:
+        return True
+    if head.startswith((_numpy_magic_bytes, _7z_magic_bytes) + _zip_magic_bytes):
+        return True
+    # Protocol 2+ pickles start with PROTO. Also require a valid opcode right after it: other binary formats can start with the
+    # same two bytes (a safetensors header length of 640 does), and for Hugging Face scans a false positive means a full download.
+    return head[:2] in _pickle_magic_bytes and len(head) > 2 and chr(head[2]) in pickletools.code2op
 
 
 def _is_7z_file(f: IO[bytes]) -> bool:
@@ -282,8 +313,7 @@ def _is_7z_file(f: IO[bytes]) -> bool:
         byte = f.read(1)
     f.seek(start)
 
-    local_header_magic_number = [b"7", b"z", b"\xbc", b"\xaf", b"\x27", b"\x1c"]
-    return read_bytes == local_header_magic_number
+    return b"".join(read_bytes) == _7z_magic_bytes
 
 
 def _is_legacy_pytorch(data: IO[bytes]) -> bool:
@@ -296,26 +326,133 @@ def _is_legacy_pytorch(data: IO[bytes]) -> bool:
     return magic == MAGIC_NUMBER
 
 
-def _http_get(url) -> bytes:
-    _log.debug(f"Request: GET {url}")
+_max_redirects = 10
+
+
+def _http_get(url, max_bytes: Optional[int] = None, _redirects: int = 0) -> bytes:
+    """GET url; with max_bytes, only its first max_bytes bytes (a Range request, and a bounded read if the server ignores it)."""
+    _log.debug(f"Request: GET {url}" + ("" if max_bytes is None else f" (first {max_bytes} bytes)"))
 
     parsed_url = urllib.parse.urlparse(url)
     path_and_query = parsed_url.path + ("?" + parsed_url.query if len(parsed_url.query) > 0 else "")
+    headers = {} if max_bytes is None else {"Range": f"bytes=0-{max_bytes - 1}"}
 
-    conn = http.client.HTTPSConnection(parsed_url.netloc)
+    connection = http.client.HTTPConnection if parsed_url.scheme == "http" else http.client.HTTPSConnection
+    conn = connection(parsed_url.netloc)
     try:
-        conn.request("GET", path_and_query)
+        conn.request("GET", path_and_query, headers=headers)
         response = conn.getresponse()
         _log.debug(f"Response: status code {response.status} reason {response.reason}")
-        if response.status == 302:  # Follow redirections
-            return _http_get(response.headers["Location"])
+        if response.status in (301, 302, 303, 307, 308):  # Follow redirections
+            location = response.headers.get("Location")
+            if not location or _redirects >= _max_redirects:
+                raise RuntimeError(f"HTTP {response.status} calling GET {url}: " + ("too many redirections" if location else "no Location"))
+            # Hugging Face redirects small files to a relative location (/api/resolve-cache/...)
+            return _http_get(urllib.parse.urljoin(url, location), max_bytes, _redirects + 1)
         elif response.status >= 400:
             raise RuntimeError(
                 f"HTTP {response.status} ({response.reason}) calling GET {parsed_url.scheme}://{parsed_url.netloc}{path_and_query}"
             )
-        return response.read()
+        return response.read() if max_bytes is None else response.read(max_bytes)
     finally:
         conn.close()
+
+
+class _SkippedBytes:
+    """Stands in for a bytes argument too large to be a module or global name (tensor data, typically): only its size is kept.
+
+    Used as a STACK_GLOBAL operand it reads as "unknown", like any other non-string operand, so the import is reported as dangerous.
+    """
+
+    __slots__ = ("size",)
+
+    def __init__(self, size: int):
+        self.size = size
+
+    def __str__(self) -> str:
+        return "unknown"
+
+    def __repr__(self) -> str:
+        return f"<{self.size} bytes skipped>"
+
+
+# Bytes arguments larger than this are skipped instead of being loaded into memory
+_max_kept_bytes_arg_size = 4096
+_skip_chunk_size = 1 << 20
+
+
+def _bytes_arg_reader(name: str, read_size, wrap=bytes):
+    def reader(f: IO[bytes]):
+        size = read_size(f)
+        if size <= _max_kept_bytes_arg_size:
+            data = f.read(size)
+            if len(data) != size:
+                raise ValueError(f"expected {size} bytes in a {name}, but only {len(data)} remain")
+            return wrap(data)
+        # Read through in chunks rather than seeking, so a truncated argument is detected like pickletools does
+        remaining = size
+        while remaining > 0:
+            chunk = f.read(min(remaining, _skip_chunk_size))
+            if not chunk:
+                raise ValueError(f"expected {size} bytes in a {name}, but only {size - remaining} remain")
+            remaining -= len(chunk)
+        return _SkippedBytes(size)
+
+    return reader
+
+
+_arg_readers = {
+    pickletools.bytes1: _bytes_arg_reader("bytes1", pickletools.read_uint1),
+    pickletools.bytes4: _bytes_arg_reader("bytes4", pickletools.read_uint4),
+    pickletools.bytes8: _bytes_arg_reader("bytes8", pickletools.read_uint8),
+    pickletools.bytearray8: _bytes_arg_reader("bytearray8", pickletools.read_uint8, bytearray),
+}
+
+
+def _genops(data: IO[bytes]):
+    """pickletools.genops, except that large bytes arguments are skipped instead of read into memory.
+
+    Model weights pickled in-band (numpy arrays, raw tensor bytes...) are a few opcodes carrying gigabytes of arguments.
+    """
+    while True:
+        pos = data.tell()
+        code = data.read(1)
+        opcode = pickletools.code2op.get(code.decode("latin-1"))
+        if opcode is None:
+            if code == b"":
+                raise ValueError("pickle exhausted before seeing STOP")
+            raise ValueError(f"at position {pos}, opcode {code!r} unknown")
+        arg = None if opcode.arg is None else _arg_readers.get(opcode.arg, opcode.arg.reader)(data)
+        yield opcode, arg, pos
+        if code == b".":
+            break
+
+
+_memo_put_ops = {"MEMOIZE", "PUT", "BINPUT", "LONG_BINPUT"}
+_memo_get_ops = {"GET", "BINGET", "LONG_BINGET"}
+_string_ops = {"SHORT_BINUNICODE", "UNICODE", "BINUNICODE", "BINUNICODE8", "STRING", "BINSTRING", "SHORT_BINSTRING"}
+
+
+def _stack_global_operand(op_name: str, op_value, memo: dict, pos) -> str:
+    if op_name in _memo_get_ops:
+        try:
+            memo_key = int(op_value)
+        except (ValueError, TypeError, IndexError) as e:
+            _log.debug(f"Invalid memo key at position {pos}: (error: {e}), treating as unknown")
+            return "unknown"
+        if memo_key not in memo:
+            _log.debug(f"Memo key {memo_key} not found at position {pos}, treating as unknown (potential evasion attempt)")
+            return "unknown"
+        memo_value = memo[memo_key]
+        # Normalize memo value to string to prevent type confusion
+        if not isinstance(memo_value, str):
+            _log.debug(f"Memo value at position {pos} is not a string (type: {type(memo_value).__name__}), casting to string")
+            memo_value = str(memo_value)
+        return memo_value
+    if op_name not in _string_ops:
+        _log.debug("Presence of non-string opcode, categorizing as an unknown dangerous import")
+        return "unknown"
+    return op_value
 
 
 def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]]:
@@ -325,88 +462,48 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
     # Scan the data for pickle buffers, stopping when parsing fails or stops making progress
     last_byte = b"dummy"
     parsing_pkl_error = None
+    malformed_pkl_error = None
     while last_byte != b"":
-        # List opcodes
-        ops = []
+        # Opcodes are processed as they are parsed rather than collected first: their arguments can hold the model weights.
+        # STACK_GLOBAL only needs the two latest opcodes that push a value (memo writes push nothing), so only those are kept.
+        previous_op = None
+        value_ops = deque(maxlen=2)
+        stack_global_underflow = None
         try:
-            for op in pickletools.genops(data):
-                ops.append(op)
+            for op, op_value, pos in _genops(data):
+                op_name = op.name
+                if op_name == "MEMOIZE":
+                    if previous_op is not None:
+                        memo[len(memo)] = previous_op[1]
+                elif op_name in ("PUT", "BINPUT", "LONG_BINPUT"):
+                    if previous_op is not None:
+                        memo[op_value] = previous_op[1]
+                elif op_name in ("GLOBAL", "INST"):
+                    globals.add(tuple(op_value.split(" ", 1)))
+                elif op_name == "STACK_GLOBAL":
+                    # Operands are resolved now, against the memo as it is when STACK_GLOBAL runs
+                    values = [_stack_global_operand(name, value, memo, value_pos) for name, value, value_pos in reversed(value_ops)]
+                    if len(values) == 2:
+                        globals.add((values[1], values[0]))
+                    elif stack_global_underflow is None:
+                        stack_global_underflow = f"Found {len(values)} values for STACK_GLOBAL at position {pos} instead of 2."
+
+                if op_name not in _memo_put_ops:
+                    value_ops.append((op_name, op_value, pos))
+                previous_op = (op_name, op_value)
         except Exception as e:
             _log.debug(f"Error parsing pickle: {e}", exc_info=True)
             parsing_pkl_error = str(e)
+        else:
+            # The unpickler rejects a STACK_GLOBAL with too few operands, so this pickle cannot load. Only report it when the rest
+            # of the pickle parsed fine: random binary data trips over this regularly before hitting an invalid opcode, and should
+            # keep being reported as "not a pickle" rather than as a scan error.
+            if stack_global_underflow is not None and malformed_pkl_error is None:
+                malformed_pkl_error = stack_global_underflow
         last_byte = data.read(1)
         if last_byte != b"":
-            # Rewind the peeked byte so the next genops pass starts on it. A backward seek on a ZipExtFile resets the member and re-reads
-            # it from the start, and on Python 3.12+ that reset also re-enables the CRC validation RelaxedZipFile deliberately disabled
-            # (zipfile restores _expected_crc from a copy captured in ZipExtFile.__init__, before RelaxedZipFile nulled it).
-            # A corrupt-CRC member would then raise BadZipFile here, after parsing succeeded, discarding the globals already found in it.
+            # Rewind the peeked byte so the next genops pass starts on it
             data.seek(-1, 1)
-
-        # Extract global imports
-        for n in range(len(ops)):
-            op = ops[n]
-            op_name = op[0].name
-            op_value = op[1]
-
-            if op_name == "MEMOIZE" and n > 0:
-                memo[len(memo)] = ops[n - 1][1]
-            elif op_name in ["PUT", "BINPUT", "LONG_BINPUT"] and n > 0:
-                memo[op_value] = ops[n - 1][1]
-            elif op_name in ("GLOBAL", "INST"):
-                globals.add(tuple(op_value.split(" ", 1)))
-            elif op_name == "STACK_GLOBAL":
-                values = []
-                for offset in range(1, n + 1):
-                    if ops[n - offset][0].name in [
-                        "MEMOIZE",
-                        "PUT",
-                        "BINPUT",
-                        "LONG_BINPUT",
-                    ]:
-                        continue
-                    if ops[n - offset][0].name in ["GET", "BINGET", "LONG_BINGET"]:
-                        try:
-                            memo_key = int(ops[n - offset][1])
-                        except (ValueError, TypeError, IndexError) as e:
-                            _log.debug(f"Invalid memo key at position {n - offset}: (error: {e}), treating as unknown")
-                            values.append("unknown")
-                            continue
-
-                        if memo_key not in memo:
-                            _log.debug(
-                                f"Memo key {memo_key} not found at position {n - offset}, treating as unknown (potential evasion attempt)"
-                            )
-                            values.append("unknown")
-                        else:
-                            memo_value = memo[memo_key]
-                            # Normalize memo value to string to prevent type confusion
-                            if not isinstance(memo_value, str):
-                                _log.debug(
-                                    f"Memo value at position {n - offset} is not a string (type: {type(memo_value).__name__}), casting to string"
-                                )
-                                memo_value = str(memo_value)
-                            values.append(memo_value)
-                    elif ops[n - offset][0].name not in [
-                        "SHORT_BINUNICODE",
-                        "UNICODE",
-                        "BINUNICODE",
-                        "BINUNICODE8",
-                        "STRING",
-                        "BINSTRING",
-                        "SHORT_BINSTRING",
-                    ]:
-                        _log.debug("Presence of non-string opcode, categorizing as an unknown dangerous import")
-                        values.append("unknown")
-                    else:
-                        values.append(ops[n - offset][1])
-                    if len(values) == 2:
-                        break
-                if len(values) != 2:
-                    raise GenOpsError(
-                        f"Found {len(values)} values for STACK_GLOBAL at position {n} instead of 2.",
-                        globals if len(globals) > 0 else None,
-                    )
-                globals.add((values[1], values[0]))
 
         if not multiple_pickles:
             break
@@ -416,8 +513,12 @@ def _list_globals(data: IO[bytes], multiple_pickles=True) -> Set[Tuple[str, str]
             # Thus return the already found globals in the error & let the caller decide what to do.
             # Additionally, we return the error at the end of the loop to scan imports in partially broken files,
             # which can unpickle and be dangerous regardless of being valid pickle.
-            globals_opt = globals if len(globals) > 0 else None
+            # A pickle known to be malformed is reported with its (possibly empty) globals rather than as "not a pickle" (None).
+            globals_opt = globals if len(globals) > 0 or malformed_pkl_error is not None else None
             raise GenOpsError(parsing_pkl_error, globals_opt)
+
+    if malformed_pkl_error is not None:
+        raise GenOpsError(malformed_pkl_error, globals)
 
     return globals
 
@@ -541,30 +642,55 @@ def scan_zip_bytes(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResu
         _log.debug("Files in zip archive %s: %s", file_id, file_names)
         for file_name in file_names:
             try:
-                with zip.open(file_name, "r") as file:
-                    magic_bytes = file.read(8)
-                file_ext = os.path.splitext(file_name)[1]
+                # Members are wrapped in a BufferedReader: it makes the many small reads of the pickle parser cheap, lets us peek at the
+                # magic bytes without reopening the member, and absorbs short backward seeks that would otherwise make ZipExtFile
+                # rewind and decompress the member again from its start.
+                with zip.open(file_name, "r") as member, io.BufferedReader(member, _zip_member_buffer_size) as file:
+                    magic_bytes = file.peek(8)[:8]
+                    file_ext = os.path.splitext(file_name)[1]
+                    member_id = f"{file_id}:{file_name}"
 
-                # Magic bytes take precedence over the file extension
-                if magic_bytes.startswith(_numpy_magic_bytes):
-                    _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
-                    with zip.open(file_name, "r") as file:
-                        result.merge(scan_numpy(file, f"{file_id}:{file_name}", strict=strict, _depth=_depth + 1))
+                    # Magic bytes take precedence over the file extension
+                    if magic_bytes.startswith(_numpy_magic_bytes):
+                        _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
+                        # Not read in full: scan_numpy only reads the header of numeric arrays, which can be gigabytes
+                        result.merge(scan_numpy(file, member_id, strict=strict, _depth=_depth + 1))
 
-                elif file_ext in _pickle_file_extensions or any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
-                    _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
-                    with zip.open(file_name, "r") as file:
-                        result.merge(scan_pickle_bytes(file, f"{file_id}:{file_name}", strict=strict))
+                    elif file_ext in _pickle_file_extensions or any(magic_bytes.startswith(mn) for mn in _pickle_magic_bytes):
+                        _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
+                        # ZipExtFile never returns more than the declared size, so the in-memory copy is bounded too
+                        if zip.getinfo(file_name).file_size <= _max_in_memory_pickle_member_size:
+                            data, read_error = _read_until_error(file)
+                            result.merge(scan_pickle_bytes(io.BytesIO(data), member_id, strict=strict))
+                            if read_error is not None:
+                                # Loaders reading the member as a stream run what precedes the corruption: that part was scanned
+                                _log.warning("Invalid file %s in zip archive %s: %s", file_name, file_id, read_error)
+                                result.scan_err = True
+                        else:
+                            result.merge(scan_pickle_bytes(file, member_id, strict=strict))
 
-                elif file_ext in _numpy_file_extensions:
-                    _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
-                    with zip.open(file_name, "r") as file:
-                        result.merge(scan_numpy(file, f"{file_id}:{file_name}", strict=strict, _depth=_depth + 1))
-            except (zipfile.BadZipFile, RuntimeError) as e:
-                # Log decompression issues (password protected, corrupted, etc.)
+                    elif file_ext in _numpy_file_extensions:
+                        _log.debug("Scanning file %s in zip archive %s", file_name, file_id)
+                        result.merge(scan_numpy(file, member_id, strict=strict, _depth=_depth + 1))
+            except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, EOFError, OSError) as e:
+                # Log decompression issues (password protected, corrupted, unsupported compression method...)
                 _log.warning("Invalid file %s in zip archive %s: %s", file_name, file_id, str(e))
+                result.scan_err = True
 
     return result
+
+
+def _read_until_error(file: IO[bytes]) -> Tuple[bytes, Optional[Exception]]:
+    """Reads a stream to its end, or up to a read error (corrupted compressed data...): what was read, and the error."""
+    chunks = []
+    try:
+        while True:
+            chunk = file.read(1 << 20)
+            if not chunk:
+                return b"".join(chunks), None
+            chunks.append(chunk)
+    except (zipfile.BadZipFile, zlib.error, EOFError, OSError) as e:
+        return b"".join(chunks), e
 
 
 def scan_numpy(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
@@ -574,14 +700,12 @@ def scan_numpy(data: IO[bytes], file_id, strict=False, _depth=0) -> ScanResult:
     import numpy as np
 
     # Code to distinguish from NumPy binary files and pickles.
-    _ZIP_PREFIX = b"PK\x03\x04"
-    _ZIP_SUFFIX = b"PK\x05\x06"  # empty zip files start with this
     N = len(np.lib.format.MAGIC_PREFIX)
     magic = data.read(N)
     # If the file size is less than N, we need to make sure not
     # to seek past the beginning of the file
     data.seek(-min(N, len(magic)), 1)  # back-up
-    if magic.startswith(_ZIP_PREFIX) or magic.startswith(_ZIP_SUFFIX):
+    if magic.startswith(_zip_magic_bytes):
         return scan_zip_bytes(data, file_id, strict=strict, _depth=_depth)
     elif magic == np.lib.format.MAGIC_PREFIX:
         # .npy file
@@ -654,6 +778,28 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None, strict=
     start = data.tell()
     magic_bytes = data.read(8)
     data.seek(start)
+    is_zip = zipfile.is_zipfile(data)
+    data.seek(start)
+
+    result = _scan_bytes_by_content(data, file_id, file_ext, magic_bytes, is_zip, strict, _depth)
+
+    # zipfile (and loaders built on it, like pandas.read_pickle on a .zip) locates an archive from its end record and ignores
+    # anything in front of it, while pickle, NumPy and PyTorch loaders read from the first byte. A file holding a zip that does not
+    # start at offset 0 is therefore read differently by each: scan the zip too, on top of the content found at the start.
+    if is_zip and not magic_bytes.startswith(_zip_magic_bytes):
+        _log.debug(f"{file_id} has data in front of a zip archive, scanning both")
+        data.seek(start)
+        try:
+            result.merge(scan_zip_bytes(data, file_id, strict=strict, _depth=_depth))
+        except zipfile.BadZipFile as e:
+            # is_zipfile only checks for an end record: if no zip reader can open the archive, there is nothing to load from it
+            _log.warning(f"WARNING: could not open the zip archive embedded in {file_id}: {e}")
+
+    return result
+
+
+def _scan_bytes_by_content(data: IO[bytes], file_id, file_ext, magic_bytes, is_zip, strict, _depth) -> ScanResult:
+    start = data.tell()
 
     def is_legacy_pytorch() -> bool:
         return file_ext not in _pickle_file_extensions and _is_legacy_pytorch(data)
@@ -676,9 +822,8 @@ def scan_bytes(data: IO[bytes], file_id, file_ext: Optional[str] = None, strict=
             return scan_pytorch(data, file_id, strict=strict, _depth=_depth)
         return scan_pickle_bytes(data, file_id, strict=strict)
 
-    is_zip = zipfile.is_zipfile(data)
-    data.seek(start)
-    if is_zip:
+    # A zip with data in front of it is scanned by scan_bytes on top of the content at the start
+    if is_zip and magic_bytes.startswith(_zip_magic_bytes):
         return scan_zip_bytes(data, file_id, strict=strict, _depth=_depth)
     elif _is_7z_file(data):
         return scan_7z_bytes(data, file_id, strict=strict, _depth=_depth)
@@ -699,10 +844,12 @@ def scan_huggingface_model(repo_id, strict=False):
     scan_result = ScanResult([])
     for file_name in file_names:
         file_ext = os.path.splitext(file_name)[1]
-        if file_ext not in _zip_file_extensions and file_ext not in _pickle_file_extensions and file_ext not in _pytorch_file_extensions:
+        url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
+        # Only the first bytes are fetched to decide, so that large non-pickle files (safetensors, GGUF...) are never downloaded
+        if file_ext not in _scanned_file_extensions and not _should_scan(_http_get(url, max_bytes=_probe_size), file_ext):
+            _log.debug("Skipping file %s in model %s: not a format we scan", file_name, repo_id)
             continue
         _log.debug("Scanning file %s in model %s", file_name, repo_id)
-        url = f"https://huggingface.co/{repo_id}/resolve/main/{file_name}"
         data = io.BytesIO(_http_get(url))
         scan_result.merge(scan_bytes(data, url, file_ext, strict=strict))
 
@@ -736,12 +883,6 @@ def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None, strict=F
 
         for file_name in file_names:
             file_ext = os.path.splitext(file_name)[1]
-            if (
-                file_ext not in _zip_file_extensions
-                and file_ext not in _pickle_file_extensions
-                and file_ext not in _pytorch_file_extensions
-            ):
-                continue
             file_path = os.path.join(base_path, file_name)
 
             # --- file filtering ---
@@ -753,8 +894,16 @@ def scan_directory_path(path, scan_filter: Optional[ScanFilter] = None, strict=F
                     _log.debug("Skipping file %s (no --include match)", file_path)
                     continue
 
-            _log.debug("Scanning file %s", file_path)
+            # Not FIFOs, devices or broken links: opening a FIFO blocks until something writes to it
+            if not os.path.isfile(file_path):
+                _log.debug("Skipping %s: not a regular file", file_path)
+                continue
             with open(file_path, "rb") as file:
+                if not _should_scan(file.read(_probe_size), file_ext):
+                    _log.debug("Skipping file %s: not a format we scan", file_path)
+                    continue
+                file.seek(0)
+                _log.debug("Scanning file %s", file_path)
                 scan_result.merge(scan_bytes(file, file_path, file_ext, strict=strict))
 
     return scan_result
