@@ -15,10 +15,12 @@ import pytest
 import zipfile
 
 from picklescan.cli import main
+import picklescan.scanner as scanner_module
 from picklescan.scanner import (
     Global,
     SafetyLevel,
     ScanFilter,
+    ScanErrorKind,
     ScanResult,
     _http_get,
     _list_globals,
@@ -1238,6 +1240,14 @@ def _corrupt_crc(zip_data: bytes, member_data: bytes) -> bytes:
     return zip_data.replace(crc, (zlib.crc32(member_data) ^ 0xFFFFFFFF).to_bytes(4, "little"))
 
 
+def test_scan_bytes_end_record_without_archive():
+    # zipfile.is_zipfile only looks for an end record: when no archive can be opened from it, there is nothing a zip loader reads
+    end_record = b"PK\x05\x06" + (0).to_bytes(4, "little") + (1).to_bytes(2, "little") * 2 + (46).to_bytes(4, "little") + bytes(6)
+    result = scan_bytes(io.BytesIO(pickle.dumps(OrderedDict()) + end_record), "end_record.pkl", ".pkl")
+    assert Global("collections", "OrderedDict", SafetyLevel.Innocuous) in result.globals
+    assert not any(error.kind is ScanErrorKind.ARCHIVE for error in result.errors)
+
+
 def test_scan_zip_bytes_corrupt_crc_with_trailing_data():
     """PyTorch ignores zip CRCs and stops unpickling at STOP: a bad CRC and bytes after the pickle must not hide its globals."""
     for compression in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
@@ -1257,6 +1267,54 @@ def test_relaxed_zipfile_crc_stays_disabled_after_rewind():
         assert file.read() == member
         file.seek(0)  # resets the member: on Python 3.12+ this used to restore the CRC check
         assert file.read() == member
+
+
+def _error_kinds(result: ScanResult):
+    return sorted((e.kind for e in result.errors), key=lambda k: k.value)
+
+
+def test_errors_are_structured():
+    # parse error after an import: the import is reported, and the error says what went wrong
+    result = scan_pickle_bytes(io.BytesIO(pickle.dumps(Malicious1()) + b"\xff"), "trailing_garbage.pkl")
+    assert result.issues_count == 1 and result.scan_err
+    assert _error_kinds(result) == [ScanErrorKind.PARSE]
+    assert result.errors[0].file_id == "trailing_garbage.pkl" and "opcode" in result.errors[0].message
+
+    # unreadable zip member: reported instead of only logged
+    member = pickle.dumps(list(range(10000)))
+    zip_data = bytearray(_zip_bytes([("archive/data.pkl", member)], zipfile.ZIP_DEFLATED))
+    zip_data[60:80] = b"\xff" * 20  # corrupt the deflate stream
+    result = scan_bytes(io.BytesIO(bytes(zip_data)), "corrupt.zip", ".zip")
+    assert _error_kinds(result) == [ScanErrorKind.ARCHIVE]
+    assert result.errors[0].file_id == "corrupt.zip:archive/data.pkl"
+
+    # unsupported NumPy format version
+    result = scan_bytes(io.BytesIO(b"\x93NUMPY\x09\x00" + b"\x00" * 64), "future.npy", ".npy")
+    assert _error_kinds(result) == [ScanErrorKind.UNSUPPORTED]
+
+
+def test_missing_py7zr_is_an_error_not_an_exception(monkeypatch):
+    monkeypatch.setitem(sys.modules, "py7zr", None)
+    result = scan_file_path(f"{_root_path}/data/malicious1.7z")
+    assert _error_kinds(result) == [ScanErrorKind.MISSING_DEPENDENCY]
+    assert result.globals == []
+
+
+def test_scan_directory_path_isolates_failures(tmp_path, monkeypatch):
+    (tmp_path / "a.pkl").write_bytes(pickle.dumps(Malicious1()))
+    (tmp_path / "b.pkl").write_bytes(pickle.dumps({"benign": True}))
+    original = scanner_module.scan_bytes
+
+    def flaky_scan_bytes(data, file_id, *args, **kwargs):
+        if file_id.endswith("b.pkl"):
+            raise RuntimeError("boom")
+        return original(data, file_id, *args, **kwargs)
+
+    monkeypatch.setattr(scanner_module, "scan_bytes", flaky_scan_bytes)
+    result = scan_directory_path(str(tmp_path))
+    assert result.issues_count == 1  # a.pkl was still scanned
+    assert _error_kinds(result) == [ScanErrorKind.INTERNAL]
+    assert result.errors[0].file_id.endswith("b.pkl") and "boom" in result.errors[0].message
 
 
 def test_scan_directory_path():
