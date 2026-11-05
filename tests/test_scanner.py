@@ -773,6 +773,43 @@ def test_scan_file_path():
         [Global("test.support.script_helper", "assert_python_ok", SafetyLevel.Dangerous)],
     )
 
+    # Issue #79: stdlib callables missed by the default deny list
+    assert_scan("issue79_thread_start_new_thread.pkl", [Global("_thread", "start_new_thread", SafetyLevel.Dangerous)])
+    assert_scan("issue79_antigravity_geohash.pkl", [Global("antigravity", "geohash", SafetyLevel.Dangerous)])
+    assert_scan("issue79_asynchat_async_chat.pkl", [Global("asynchat", "async_chat", SafetyLevel.Dangerous)])
+    assert_scan("issue79_bz2_open.pkl", [Global("bz2", "open", SafetyLevel.Dangerous)])
+    assert_scan("issue79_code_InteractiveInterpreter.pkl", [Global("code", "InteractiveInterpreter", SafetyLevel.Dangerous)])
+    assert_scan("issue79_code_interact.pkl", [Global("code", "interact", SafetyLevel.Dangerous)])
+    assert_scan("issue79_crypt_crypt.pkl", [Global("crypt", "crypt", SafetyLevel.Dangerous)])
+    assert_scan("issue79_dbm_gnu_open.pkl", [Global("dbm.gnu", "open", SafetyLevel.Dangerous)])
+    assert_scan("issue79_dbm_open.pkl", [Global("dbm", "open", SafetyLevel.Dangerous)])
+    assert_scan("issue79_fcntl_ioctl.pkl", [Global("fcntl", "ioctl", SafetyLevel.Dangerous)])
+    assert_scan("issue79_fileinput_input.pkl", [Global("fileinput", "input", SafetyLevel.Dangerous)])
+    assert_scan("issue79_ftplib_FTP.pkl", [Global("ftplib", "FTP", SafetyLevel.Dangerous)])
+    assert_scan("issue79_getpass_getpass.pkl", [Global("getpass", "getpass", SafetyLevel.Dangerous)])
+    assert_scan("issue79_gzip_open.pkl", [Global("gzip", "open", SafetyLevel.Dangerous)])
+    assert_scan("issue79_http_client_HTTPConnection.pkl", [Global("http.client", "HTTPConnection", SafetyLevel.Dangerous)])
+    assert_scan("issue79_linecache_getline.pkl", [Global("linecache", "getline", SafetyLevel.Dangerous)])
+    assert_scan("issue79_lzma_open.pkl", [Global("lzma", "open", SafetyLevel.Dangerous)])
+    assert_scan("issue79_marshal_loads.pkl", [Global("marshal", "loads", SafetyLevel.Dangerous)])
+    assert_scan("issue79_mmap_mmap.pkl", [Global("mmap", "mmap", SafetyLevel.Dangerous)])
+    assert_scan("issue79_multiprocessing_Pool.pkl", [Global("multiprocessing", "Pool", SafetyLevel.Dangerous)])
+    assert_scan("issue79_multiprocessing_Process.pkl", [Global("multiprocessing", "Process", SafetyLevel.Dangerous)])
+    assert_scan("issue79_numpy_load.pkl", [Global("numpy", "load", SafetyLevel.Dangerous)])
+    assert_scan("issue79_resource_setrlimit.pkl", [Global("resource", "setrlimit", SafetyLevel.Dangerous)])
+    assert_scan("issue79_selectors_DefaultSelector.pkl", [Global("selectors", "DefaultSelector", SafetyLevel.Dangerous)])
+    assert_scan("issue79_shelve_open.pkl", [Global("shelve", "open", SafetyLevel.Dangerous)])
+    assert_scan("issue79_signal_pthread_kill.pkl", [Global("_signal", "pthread_kill", SafetyLevel.Dangerous)])
+    assert_scan("issue79_smtplib_SMTP.pkl", [Global("smtplib", "SMTP", SafetyLevel.Dangerous)])
+    assert_scan("issue79_tarfile_open.pkl", [Global("tarfile", "open", SafetyLevel.Dangerous)])
+    assert_scan("issue79_telnetlib_Telnet.pkl", [Global("telnetlib", "Telnet", SafetyLevel.Dangerous)])
+    assert_scan("issue79_tempfile_mktemp.pkl", [Global("tempfile", "mktemp", SafetyLevel.Dangerous)])
+    assert_scan("issue79_threading_Thread.pkl", [Global("threading", "Thread", SafetyLevel.Dangerous)])
+    assert_scan("issue79_trace_Trace.pkl", [Global("trace", "Trace", SafetyLevel.Dangerous)])
+    assert_scan("issue79_xmlrpc_client_ServerProxy.pkl", [Global("xmlrpc.client", "ServerProxy", SafetyLevel.Dangerous)])
+    assert_scan("issue79_xmlrpc_server_SimpleXMLRPCServer.pkl", [Global("xmlrpc.server", "SimpleXMLRPCServer", SafetyLevel.Dangerous)])
+    assert_scan("issue79_zipfile_ZipFile.pkl", [Global("zipfile", "ZipFile", SafetyLevel.Dangerous)])
+
 
 def test_scan_file_path_npz():
     compare_scan_results(

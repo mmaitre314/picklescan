@@ -638,6 +638,156 @@ def initialize_not_a_pickle_file(path: str):
     print(f"Initialized file {path}.")
 
 
+def reduce_issue79_antigravity_geohash():
+    import antigravity
+
+    return antigravity.geohash, (0, 0, b"x")
+
+
+def reduce_issue79_bz2_open():
+    import bz2
+
+    return bz2.open, ("/dev/null",)
+
+
+def reduce_issue79_code_InteractiveInterpreter():
+    import code
+
+    return code.InteractiveInterpreter, ()
+
+
+def reduce_issue79_code_interact():
+    import code
+
+    return code.interact, ()
+
+
+def reduce_issue79_dbm_open():
+    import dbm
+
+    return dbm.open, ("/tmp/x", "n")
+
+
+def reduce_issue79_fcntl_ioctl():
+    import fcntl
+
+    return fcntl.ioctl, (0, 0)
+
+
+def reduce_issue79_fileinput_input():
+    import fileinput
+
+    return fileinput.input, ()
+
+
+def reduce_issue79_ftplib_FTP():
+    import ftplib
+
+    return ftplib.FTP, ()
+
+
+def reduce_issue79_gzip_open():
+    import gzip
+
+    return gzip.open, ("/dev/null",)
+
+
+def reduce_issue79_http_client_HTTPConnection():
+    import http.client
+
+    return http.client.HTTPConnection, ("example.com",)
+
+
+def reduce_issue79_linecache_getline():
+    import linecache
+
+    return linecache.getline, ("/dev/null", 1)
+
+
+def reduce_issue79_lzma_open():
+    import lzma
+
+    return lzma.open, ("/dev/null",)
+
+
+def reduce_issue79_marshal_loads():
+    import marshal
+
+    return marshal.loads, (b"",)
+
+
+def reduce_issue79_mmap_mmap():
+    import mmap
+
+    return mmap.mmap, (-1, 8)
+
+
+def reduce_issue79_resource_setrlimit():
+    import resource
+
+    return resource.setrlimit, (0, (0, 0))
+
+
+def reduce_issue79_shelve_open():
+    import shelve
+
+    return shelve.open, ("/tmp/x",)
+
+
+def reduce_issue79_signal_pthread_kill():
+    import signal
+
+    return signal.pthread_kill, (0, 0)
+
+
+def reduce_issue79_smtplib_SMTP():
+    import smtplib
+
+    return smtplib.SMTP, ()
+
+
+def reduce_issue79_tempfile_mktemp():
+    import tempfile
+
+    return tempfile.mktemp, ()
+
+
+def reduce_issue79_threading_Thread():
+    import threading
+
+    return threading.Thread, ()
+
+
+def reduce_issue79_trace_Trace():
+    import trace
+
+    return trace.Trace, ()
+
+
+def reduce_issue79_xmlrpc_client_ServerProxy():
+    import xmlrpc.client
+
+    return xmlrpc.client.ServerProxy, ("http://example.com",)
+
+
+def reduce_issue79_xmlrpc_server_SimpleXMLRPCServer():
+    import xmlrpc.server
+
+    return xmlrpc.server.SimpleXMLRPCServer, (("127.0.0.1", 0),)
+
+
+def reduce_issue79_zipfile_ZipFile():
+    import zipfile
+
+    return zipfile.ZipFile, ("/dev/null",)
+
+
+def reduce_issue79_numpy_load():
+    import numpy
+
+    return numpy.load, ("/dev/null",)
+
+
 def initialize_pickle_files():
     os.makedirs(f"{_root_path}/data", exist_ok=True)
 
@@ -1009,6 +1159,62 @@ def initialize_pickle_files():
             ]
         ),
     )
+
+    # Issue #79: stdlib deny-list gaps (default mode missed these; --strict already flagged them)
+    initialize_pickle_file_from_reduce("issue79_antigravity_geohash.pkl", reduce_issue79_antigravity_geohash)
+    initialize_pickle_file_from_reduce("issue79_bz2_open.pkl", reduce_issue79_bz2_open)
+    initialize_pickle_file_from_reduce("issue79_code_InteractiveInterpreter.pkl", reduce_issue79_code_InteractiveInterpreter)
+    initialize_pickle_file_from_reduce("issue79_code_interact.pkl", reduce_issue79_code_interact)
+    initialize_pickle_file_from_reduce("issue79_dbm_open.pkl", reduce_issue79_dbm_open)
+    initialize_pickle_file_from_reduce("issue79_fcntl_ioctl.pkl", reduce_issue79_fcntl_ioctl)
+    initialize_pickle_file_from_reduce("issue79_fileinput_input.pkl", reduce_issue79_fileinput_input)
+    initialize_pickle_file_from_reduce("issue79_ftplib_FTP.pkl", reduce_issue79_ftplib_FTP)
+    initialize_pickle_file_from_reduce("issue79_gzip_open.pkl", reduce_issue79_gzip_open)
+    initialize_pickle_file_from_reduce("issue79_http_client_HTTPConnection.pkl", reduce_issue79_http_client_HTTPConnection)
+    initialize_pickle_file_from_reduce("issue79_linecache_getline.pkl", reduce_issue79_linecache_getline)
+    initialize_pickle_file_from_reduce("issue79_lzma_open.pkl", reduce_issue79_lzma_open)
+    initialize_pickle_file_from_reduce("issue79_marshal_loads.pkl", reduce_issue79_marshal_loads)
+    initialize_pickle_file_from_reduce("issue79_mmap_mmap.pkl", reduce_issue79_mmap_mmap)
+    initialize_pickle_file_from_reduce("issue79_resource_setrlimit.pkl", reduce_issue79_resource_setrlimit)
+    initialize_pickle_file_from_reduce("issue79_shelve_open.pkl", reduce_issue79_shelve_open)
+    initialize_pickle_file_from_reduce("issue79_signal_pthread_kill.pkl", reduce_issue79_signal_pthread_kill)
+    initialize_pickle_file_from_reduce("issue79_smtplib_SMTP.pkl", reduce_issue79_smtplib_SMTP)
+    initialize_pickle_file_from_reduce("issue79_tempfile_mktemp.pkl", reduce_issue79_tempfile_mktemp)
+    initialize_pickle_file_from_reduce("issue79_threading_Thread.pkl", reduce_issue79_threading_Thread)
+    initialize_pickle_file_from_reduce("issue79_trace_Trace.pkl", reduce_issue79_trace_Trace)
+    initialize_pickle_file_from_reduce("issue79_xmlrpc_client_ServerProxy.pkl", reduce_issue79_xmlrpc_client_ServerProxy)
+    initialize_pickle_file_from_reduce("issue79_xmlrpc_server_SimpleXMLRPCServer.pkl", reduce_issue79_xmlrpc_server_SimpleXMLRPCServer)
+    initialize_pickle_file_from_reduce("issue79_zipfile_ZipFile.pkl", reduce_issue79_zipfile_ZipFile)
+    initialize_pickle_file_from_reduce("issue79_numpy_load.pkl", reduce_issue79_numpy_load)
+
+    # Raw STACK_GLOBAL pickles for removed modules / aliases that pickle under a different name
+    for fname, module, name in [
+        ("issue79_thread_start_new_thread.pkl", "_thread", "start_new_thread"),
+        ("issue79_asynchat_async_chat.pkl", "asynchat", "async_chat"),
+        ("issue79_crypt_crypt.pkl", "crypt", "crypt"),
+        ("issue79_dbm_gnu_open.pkl", "dbm.gnu", "open"),
+        ("issue79_telnetlib_Telnet.pkl", "telnetlib", "Telnet"),
+        ("issue79_tarfile_open.pkl", "tarfile", "open"),
+        ("issue79_getpass_getpass.pkl", "getpass", "getpass"),
+        ("issue79_selectors_DefaultSelector.pkl", "selectors", "DefaultSelector"),
+        ("issue79_multiprocessing_Process.pkl", "multiprocessing", "Process"),
+        ("issue79_multiprocessing_Pool.pkl", "multiprocessing", "Pool"),
+    ]:
+        initialize_data_file(
+            f"{_root_path}/data2/{fname}",
+            b"".join(
+                [
+                    pickle.PROTO + b"\x04",
+                    pickle.SHORT_BINUNICODE + bytes([len(module)]) + module.encode(),
+                    pickle.SHORT_BINUNICODE + bytes([len(name)]) + name.encode(),
+                    pickle.STACK_GLOBAL,
+                    pickle.SHORT_BINUNICODE + bytes([1]) + b"x",
+                    pickle.TUPLE1,
+                    pickle.REDUCE,
+                    pickle.STOP,
+                ]
+            ),
+        )
 
     initialize_cloudpickle_exploit_file(f"{_root_path}/data2/cloudpickle_codeinjection.pkl")
     initialize_codetype_exploit_file(f"{_root_path}/data2/types_CodeType.pkl")

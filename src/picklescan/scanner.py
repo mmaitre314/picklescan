@@ -181,7 +181,11 @@ _unsafe_globals = {
     "ssl": "*",  # DNS exfiltration via ssl.get_server_certificate()
     "subprocess": "*",
     "sys": "*",
-    "code": {"InteractiveInterpreter.runcode"},
+    "code": {
+        "InteractiveInterpreter",  # constructing the interpreter is enough to run arbitrary code later
+        "InteractiveInterpreter.runcode",
+        "interact",  # code.interact() drops into a REPL
+    },
     "cProfile": "*",  # cProfile.run() and cProfile.runctx() call exec() on arbitrary strings
     "distutils.file_util": "*",  # arbitrary file write via distutils.file_util.write_file()
     "doctest": {"debug_script"},
@@ -223,7 +227,7 @@ _unsafe_globals = {
     "torch.utils.data.datapipes.utils.decoder": {
         "basichandlers"
     },  # allows storing a pickle inside a pickle (if this has valid use cases, scan the input bytes instead of flagging the global)
-    "trace": {"Trace.run", "Trace.runctx"},
+    "trace": {"Trace", "Trace.run", "Trace.runctx"},
     "urllib.request": "*",  # urllib.request.urlopen can be used for SSRF and data exfiltration
     "uuid": "*",  # uuid._get_command_stdout executes arbitrary commands via subprocess.Popen
     "venv": "*",
@@ -231,12 +235,45 @@ _unsafe_globals = {
     "_osx_support": "*",  # _read_output and _find_build_tool execute commands via os.system
     "_aix_support": "*",  # _read_cmd_output executes commands via os.system
     "_pyrepl": "*",  # _pyrepl.pager.pipe_pager/tempfile_pager execute commands via subprocess/os.system
+    # --- stdlib deny-list gaps (issue #79): flagged by --strict, missed in default mode ---
+    "_thread": {"start_new_thread"},  # arbitrary thread of attacker-controlled callable
+    "antigravity": {"geohash"},  # opens a network URL via webbrowser
+    "asynchat": "*",  # removed in 3.12; async protocol handler, network I/O
+    "bz2": {"open"},  # arbitrary compressed file read/write
+    "crypt": {"crypt"},  # removed in 3.13; password hashing oracle / side channel
+    "dbm": {"open"},
+    "dbm.gnu": {"open"},
+    "fcntl": {"ioctl"},  # device control
+    "fileinput": {"input"},  # iterates arbitrary files
+    "ftplib": "*",  # FTP client, network exfil / fetch
+    "getpass": {"getpass", "unix_getpass", "win_getpass"},  # pickles as unix_getpass/win_getpass
+    "gzip": {"open"},
+    "http.client": "*",  # HTTPConnection et al.; httplib already covered for Py2 name
+    "linecache": {"getline"},  # arbitrary file read
+    "lzma": {"open"},
+    "marshal": {"loads"},  # code-object deserialization
+    "mmap": {"mmap"},  # raw memory / file mapping
+    "multiprocessing": "*",  # Pool/Process pickle as multiprocessing.context.*
+    "numpy": {"load"},  # nested pickle deserialization gadget (see TODO below)
+    "resource": {"setrlimit"},  # process resource limits
+    "selectors": "*",  # DefaultSelector pickles as EpollSelector/etc.
+    "shelve": {"open"},  # dbm+pickle nested deserialization
+    "_signal": {"pthread_kill"},  # signal.pthread_kill pickles under _signal
+    "signal": {"pthread_kill"},
+    "smtplib": "*",  # SMTP client
+    "tarfile": "*",  # TarFile.open pickles as TarFile + getattr
+    "telnetlib": "*",  # removed in 3.13; Telnet client
+    "tempfile": {"mktemp"},  # insecure temp path
+    "threading": {"Thread"},  # attacker-controlled target callable
+    "xmlrpc.client": "*",
+    "xmlrpc.server": "*",
+    "zipfile": {"ZipFile"},
 }
 
 #
 # TODO: handle methods loading other Pickle files (either mark as suspicious, or follow calls to scan other files [preventing infinite loops])
 #
-# numpy.load()
+# numpy.load() — now blocked via _unsafe_globals["numpy"]={"load"}
 # https://numpy.org/doc/stable/reference/generated/numpy.load.html#numpy.load
 # numpy.ctypeslib.load_library()
 # https://numpy.org/doc/stable/reference/routines.ctypeslib.html#numpy.ctypeslib.load_library
